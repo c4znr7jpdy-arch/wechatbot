@@ -10,6 +10,7 @@
 | **nonebot_plugin_tarot** | `/占卜` `/塔罗牌` | 塔罗牌占卜，4张牌阵 5s 间隔发送 |
 | **nonebot_plugin_mystool** | `/登录` `/签到` `/任务` | 米游社工具 |
 | **nonebot_plugin_setu_collection** | `/色图` `/来N张xx涩图` | 色图获取，走代理 127.0.0.1:7890 |
+| **nonebot_plugin_repeater** | 自动触发 | 复读机：上两条消息相同时自动复读，冷却 2 分钟 |
 
 ## AI 功能
 
