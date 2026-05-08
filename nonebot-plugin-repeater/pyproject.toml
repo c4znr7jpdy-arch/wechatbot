@@ -5,4 +5,3 @@ description = "复读机插件 — 当群里上两条消息相同时自动复读
 requires-python = ">=3.10"
 
 [tool.nonebot]
-plugins = ["nonebot_plugin_repeater"]
