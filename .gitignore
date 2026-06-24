@@ -6,3 +6,28 @@ __pycache__/
 venv/
 data/
 *.dll
+
+# IDE / AI tools
+.claude/
+.playwright-mcp/
+.cursor/
+
+# Reference docs (not project code)
+apihz-toutiao-api-docs
+all.md
+docs/
+
+# Third-party source clones (already integrated or vendored)
+Douyin_TikTok_Download_API/
+nonebot-plugin-setu/
+nonebot-plugin-tarot/
+
+# Virtual environments
+astrbot_venv/
+
+# Misc
+nul
+wechat-runtime
+checkin.js
+0.zip
+test_query.py
