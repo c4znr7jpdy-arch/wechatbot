@@ -2725,3 +2725,81 @@ eg:
 
 
  ```
+
+
+##### 请求
+
+ ``` 
+ {
+  "data": {
+    "client_msgid": 165899xx84,
+    "create_time": 1658991484,
+    "to_wxid": "xxxxxxxx",
+    "new_msgid": "86028099xxx2641"
+  },
+  "type": 11244
+}
+
+
+ ```
+
+
+##### 返回示例 
+
+``` 
+ {
+  "data": {
+    "baseResponse": {
+      "ret": 0
+    },
+    "introduction": "",
+    "sysWording": "已撤回"
+  },
+  "type": 11244
+}
+
+```
+
+
+
+
+
+
+##### 请求
+
+ ``` 
+ {
+  "data": {
+    "client_msgid": 165899xx84,
+    "create_time": 1658991484,
+    "to_wxid": "xxxxxxxx",
+    "new_msgid": "86028099xxx2641"
+  },
+  "type": 11244
+}
+
+
+ ```
+
+
+##### 返回示例 
+
+``` 
+ {
+  "data": {
+    "baseResponse": {
+      "ret": 0
+    },
+    "introduction": "",
+    "sysWording": "已撤回"
+  },
+  "type": 11244
+}
+
+```
+
+
+
+
+
+

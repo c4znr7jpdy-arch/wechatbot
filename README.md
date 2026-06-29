@@ -107,7 +107,7 @@ AI 对话由 AstrBot 的 provider pipeline 接管，配置在 `data/cmd_config.j
 - **联网搜索**: AstrBot 内置 `web_search`（bocha 引擎）
 - **唤醒前缀**: `/` 或 `\`（群聊 `@bot` 也触发；私聊无需前缀）
 
-> 旧的 Hermes 流式 + MiniMax→Grok→DeepSeek 三级 fallback 已废弃，相关代码（`ai_plugin/router.py`、`handler.py`、`hermes_client.py`、`mcp_tools.py`）保留为死代码。
+> 旧的 Hermes 流式 + MiniMax→Grok→DeepSeek 三级 fallback 已废弃，相关代码已归档到 `ai_plugin/legacy_nonebot2/`，不再处于 active import path。
 
 ### 记忆与自学习
 
@@ -177,8 +177,7 @@ AstrBot 插件通过 WebUI（http://localhost:6185）启用/禁用。`ai_plugin/
 │  scheduler_tasks                  ── APScheduler 定时任务        │
 │  magnet / style_corpus / help_card / group_notice               │
 │  ─────────────────────────────────────────────────────────────── │
-│  以下为已废弃死代码（不再走 AI 对话路径）:                        │
-│   router.py / handler.py / hermes_client.py / mcp_tools.py      │
+│  legacy_nonebot2/                 ── 已归档 NoneBot2 入口/旧 AI 路由 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -191,22 +190,15 @@ E:\Project\
 │   ├── NoveLoader.dll / NoveHelper.dll
 │   └── data/quoted_images/          # 引用图片 CDN 缓存
 │
-├── ai_plugin/                       # NoneBot2 业务层
-│   ├── bot.py                       # 启动入口 (FastAPI, :18765)
-│   ├── pyproject.toml               # 插件注册 + 依赖
+├── ai_plugin/                       # AstrBot 复用的业务模块库，非独立进程
 │   ├── .env.prod                    # API Key 配置
 │   ├── ai_plugin/
-│   │   ├── __init__.py              # 命令注册 + 功能初始化
-│   │   ├── router.py                # 消息路由 (意图检测/分发)
-│   │   ├── handler.py               # AIHandler (三级 fallback)
-│   │   ├── hermes_client.py         # Hermes Agent 流式客户端
-│   │   ├── tools.py                 # 工具注册表 (CALL: 格式)
+│   │   ├── __init__.py              # 轻量包入口，无 NoneBot2 副作用
 │   │   ├── plugin_manager.py        # 插件热管理
 │   │   ├── message_buffer.py        # 消息缓冲 (SQLite + LRU)
 │   │   ├── image_generator.py       # 文生图 (MiniMax + GPT)
 │   │   ├── image_editor.py          # 图生图 (GPT + MiniMax)
 │   │   ├── video_generator.py       # 文生视频 (MiniMax)
-│   │   ├── mcp_tools.py             # 联网搜索 + VLM
 │   │   ├── tts.py                   # 语音合成 (edge-tts)
 │   │   ├── douyin/                  # 抖音/TikTok/B站 解析
 │   │   ├── news.py / weather.py / oilprice.py / epic.py / kfc.py
@@ -223,6 +215,13 @@ E:\Project\
 │       ├── chat_history.db          # 聊天历史
 │       ├── plugin_state.json        # 插件启用状态
 │       └── schedule_tasks.json      # 定时任务持久化
+│
+│   └── legacy_nonebot2/             # 旧 NoneBot2 入口 + 旧 AI 对话路径归档
+│       ├── bot.py / nonebot2.toml / pyproject.toml
+│       └── ai_plugin/
+│           ├── __init__.py / router.py / handler.py
+│           ├── hermes_client.py / mcp_tools.py / mcp_history.py
+│           └── tools.py
 │
 ├── lib/hok_brain/                   # AI 核心库
 │   ├── ai/minimax_client.py         # LLM 客户端

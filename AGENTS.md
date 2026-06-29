@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Runtime Constraint
 
@@ -105,3 +105,53 @@ Business modules still in use or kept as reusable helpers: `image_generator.py`,
 ## Git Structure
 
 Main repo with submodules: `Py`, `ai_plugin`, `lib/hok_brain`, `nonebot-plugin-mystool`.
+
+---
+
+## Important Notes (from project memory)
+
+### Admin Identity
+管理员 wxid 固定为 `fengchenhao002`，无论微信昵称改成什么，这个 wxid 始终是管理员。
+
+### AstrBot WeChat Compat Patches (must re-apply after every `pip install --upgrade astrbot`)
+
+**1. aiocqhttp_message_event.py — session_id non-numeric support**
+File: `astrbot_venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py`
+WeChat group ID is `xxx@chatroom` format (not pure digits). Change `session_id.isdigit()` to:
+```python
+group_id = int(session_id) if session_id.isdigit() else session_id
+```
+
+**2. aiocqhttp_platform_adapter.py — at message wxid support**
+File: `astrbot_venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py`
+WeChat user IDs are `wxid_xxx` strings. Wrap `int(m["data"]["qq"])` in try-except, skip `get_group_member_info` for non-numeric IDs, use `name` field from message segment instead.
+
+### Image Generation
+- **Dual backend**: MiniMax `image-01` + GPT-Image `gpt-image-2` (via `freeapi.dgbmc.top` proxy, API key in `.env.prod`)
+- **grok-imagine-image-lite** also available on `freeapi.dgbmc.top`, works well (fast, ~10s)
+- **gpt-image-2** often times out on free proxies — use `grok-imagine-image-lite` as fallback
+- Admin command `#切换图片模型 gpt/minimax` to switch backend at runtime
+- Images auto-cleaned from `data/images/` every 2 hours
+
+### Video Generation
+Shelved — user's token plan doesn't support video models. Code remains in `video_generator.py`, not initialized.
+
+### Douyin/TikTok/Bilibili Integration
+Embedded as `ai_plugin/ai_plugin/douyin/` submodule (based on Evil0ctal/Douyin_TikTok_Download_API).
+- Images: ≤5 sent to group, >5 sent to file transfer (avoid spam), auto webp→jpg
+- Videos: watermark-free download (>25MB falls back to link), 403 falls back to text+link
+- Bilibili: parses title/author/stats, no direct download
+- Cookie configured in `.env.prod` `DOUYIN_COOKIE`
+
+### Message Processing Priority
+```
+User message → #commands → Douyin/Bilibili/TikTok links → Image gen → Video gen → Search-enhanced AI reply → Plain AI reply
+```
+
+### Collaboration Rules
+- **Before coding**: deeply understand the project and code, don't guess architecture intent
+- **Don't submit**: unrelated temp files; ask before committing
+- **memu-bot decisions**: `ignored` means AI chose not to reply (not a service crash); when @-mentioned, must reply (AI judgment issue, not code bug)
+
+### Daily Report Convention
+At end of each dev session, generate a daily report (`daily-YYYY-MM-DD.md`) summarizing all changes, issues, and fixes.

@@ -5,6 +5,7 @@
 import sys
 import os
 import re
+import asyncio
 import logging
 from pathlib import Path
 
@@ -255,3 +256,45 @@ class Main(star.Star):
                 for cmd, desc in items:
                     lines.append(f"  {cmd} — {desc}")
             yield event.plain_result("\n".join(lines))
+
+    # ── 图来（随机图片，无需前缀） ─────────────────────
+    @filter.regex(r"^图来\s*$")
+    async def random_image(self, event: AstrMessageEvent):
+        """发送随机图片，强匹配 '图来'，无需 / 或 @"""
+        import base64 as b64mod
+        import requests as _req
+        from astrbot.api.message_components import Image
+        proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+        try:
+            resp = _req.get(
+                "https://boudoir.ortlinde.com/random",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"},
+                proxies=proxies,
+                timeout=15,
+            )
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                b64 = b64mod.b64encode(resp.content).decode()
+                yield event.chain_result([Image.fromBase64(b64)])
+                # 10秒后自动撤回
+                asyncio.create_task(self._auto_recall(event, 60))
+            elif resp.status_code == 404:
+                yield event.plain_result("图库空了，等会儿再来~")
+            else:
+                yield event.plain_result(f"图片接口返回 {resp.status_code}，稍后再试")
+        except Exception as e:
+            logger.exception(f"图来失败: {e}")
+            yield event.plain_result("获取图片失败，网络开小差了")
+
+    async def _auto_recall(self, event: AstrMessageEvent, delay: int):
+        """延迟后调用 recall_last_msg 撤回最近发送的消息"""
+        await asyncio.sleep(delay)
+        try:
+            chat_id = event.get_group_id() or event.get_sender_id()
+            if not chat_id:
+                return
+            result = await event.bot.call_action(
+                "recall_last_msg", group_id=chat_id, user_id=chat_id,
+            )
+            logger.info(f"[图来撤回] chat={chat_id}, result={result}")
+        except Exception as e:
+            logger.error(f"[图来撤回] 失败: {e}")
