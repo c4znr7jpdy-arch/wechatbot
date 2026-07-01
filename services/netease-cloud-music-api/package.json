@@ -1,0 +1,12 @@
+{
+  "name": "jiang-ncm-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local NeteaseCloudMusicApi service for astrbot_plugin_music.",
+  "scripts": {
+    "start": "node node_modules/NeteaseCloudMusicApi/app.js"
+  },
+  "dependencies": {
+    "NeteaseCloudMusicApi": "4.32.0"
+  }
+}

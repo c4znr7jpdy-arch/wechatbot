@@ -329,8 +329,9 @@ class Main(star.Star):
                     tmp.write(resp.content)
                     tmp_path = tmp.name
 
-                yield event.image_result(tmp_path)
+                logger.info("[图来撤回] scheduling before image_result yield")
                 asyncio.create_task(self._auto_recall(event, 20))
+                yield event.image_result(tmp_path)
             elif resp is not None and resp.status_code == 404:
                 yield event.plain_result("图库空了，等会儿再来~")
             else:

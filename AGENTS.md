@@ -11,10 +11,10 @@ AstrBot itself runs on Python 3.13 (in `astrbot_venv`).
 
 ## Starting the Project
 
-Two processes, start in order:
+Two required processes, start in order. The local NetEase Cloud Music API is auto-started by `astrbot_plugin_music` when AstrBot loads and `nodejs_base_url` points to `127.0.0.1` / `localhost`.
 
 ```bash
-# Terminal 1: AstrBot (must be up first)
+# Terminal 1: AstrBot (must be up before WeChat injection)
 cd E:\Project
 astrbot_venv\Scripts\astrbot run
 
@@ -23,18 +23,26 @@ cd E:\Project\Py
 C:\Users\Administrator\AppData\Local\Programs\Python\Python311-32\python.exe main.py
 ```
 
+Manual NetEase API startup for troubleshooting:
+
+```bash
+cd E:\Project
+powershell -ExecutionPolicy Bypass -File scripts\start-ncm-api.ps1
+```
+
 No test suite or linting is configured.
 
 ## Architecture
 
-Dual-process system communicating via OneBot V11 WebSocket (`ws://127.0.0.1:6199/ws`):
+AstrBot and the WeChat injection layer communicate via OneBot V11 WebSocket (`ws://127.0.0.1:6199/ws`), with a local NetEase API sidecar for music URL lookup:
 
 ```
-WeChat.exe ←DLL HOOK→ Py/main.py (Py3.11-32) ←V11 WS→ AstrBot (Py3.13) ←→ LLM/Plugins
+NeteaseCloudMusicApi (:3300) ←→ AstrBot (Py3.13) ←V11 WS→ Py/main.py (Py3.11-32) ←DLL HOOK→ WeChat.exe
 ```
 
 - **AstrBot WebUI**: http://localhost:6185 (user: astrbot)
 - **aiocqhttp adapter**: reverse WS on port 6199
+- **NetEase Cloud Music API**: http://127.0.0.1:3300 (`services/netease-cloud-music-api`)
 - **LLM**: managed by AstrBot's provider system (DeepSeek default + mimo/Grok fallback chain)
 
 ### Py/main.py — WeChat Injection Layer (Python 3.11-32)

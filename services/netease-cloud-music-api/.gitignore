@@ -1,0 +1,3 @@
+node_modules/
+service.log
+npm-debug.log*
