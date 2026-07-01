@@ -1,0 +1,13 @@
+# NoneBot2 配置文件
+# https://nonebot.dev/docs/tutorial/configuration
+
+[driver]
+type = "fastapi"
+
+[driver.fastapi]
+host = "127.0.0.1"
+port = 18765
+
+# Bug7修复: 适配器类型改为 onebot12，与 bot.py 中注册的 V12Adapter 一致
+[[adapter]]
+type = "onebot12"

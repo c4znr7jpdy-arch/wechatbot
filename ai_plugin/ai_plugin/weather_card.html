@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', 'Microsoft YaHei', -apple-system, sans-serif;
+    background: linear-gradient(160deg, #6889b0 0%, #8aa8c8 35%, #a0bdd4 65%, #b8cfe0 100%);
+    width: 480px;
+    min-height: 100vh;
+    padding: 0;
+    color: #fff;
+  }
+
+  /* ── 主卡片 ── */
+  .main-card {
+    margin: 16px 16px 12px;
+    background: rgba(255,255,255,0.12);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.15);
+    position: relative;
+    overflow: hidden;
+  }
+  .main-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  }
+
+  .main-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 4px;
+  }
+  .location {
+    font-size: 15px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.88);
+    letter-spacing: 0.3px;
+  }
+  .update-time {
+    font-size: 11px;
+    color: rgba(255,255,255,0.4);
+    margin-top: 2px;
+  }
+
+  .date-line {
+    font-size: 11px;
+    color: rgba(255,255,255,0.45);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .date-line::before {
+    content: '';
+    width: 16px;
+    height: 2px;
+    background: rgba(255,255,255,0.3);
+    border-radius: 1px;
+  }
+
+  .main-body {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+  }
+  .temp-section {}
+  .temp-big {
+    font-size: 78px;
+    font-weight: 200;
+    line-height: 1;
+    letter-spacing: -4px;
+    color: #fff;
+  }
+  .temp-big .unit {
+    font-size: 36px;
+    font-weight: 300;
+    vertical-align: top;
+    margin-left: 2px;
+  }
+  .weather-label {
+    font-size: 18px;
+    font-weight: 400;
+    color: rgba(255,255,255,0.75);
+    margin-top: 4px;
+    letter-spacing: 2px;
+  }
+
+  .icon-area {
+    width: 120px;
+    height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .icon-area img {
+    width: 120px;
+    height: 120px;
+  }
+  .hour-icon img, .daily-icon img {
+    image-rendering: auto;
+  }
+
+  /* 四格详情 */
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .detail-item {
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    padding: 12px 6px;
+    text-align: center;
+  }
+  .detail-label {
+    color: rgba(255,255,255,0.45);
+    font-size: 10px;
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+  }
+  .detail-value {
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  /* ── 小时预报卡片 ── */
+  .hourly-card {
+    margin: 0 16px 12px;
+    background: rgba(255,255,255,0.10);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 20px;
+    padding: 18px 20px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .section-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.6);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-title::before {
+    content: '';
+    width: 3px;
+    height: 14px;
+    background: rgba(255,255,255,0.35);
+    border-radius: 2px;
+  }
+
+  .hourly-scroll {
+    display: flex;
+    gap: 8px;
+  }
+  .hour-item {
+    flex: 1;
+    min-width: 0;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 12px 4px;
+    text-align: center;
+    transition: all 0.2s;
+  }
+  .hour-item.active {
+    background: rgba(255,255,255,0.18);
+    border-color: rgba(255,255,255,0.28);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  .hour-time {
+    font-size: 10px;
+    color: rgba(255,255,255,0.5);
+    margin-bottom: 8px;
+    font-weight: 500;
+  }
+  .hour-icon {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 8px;
+    height: 28px;
+    align-items: center;
+  }
+  .hour-icon img {
+    width: 28px;
+    height: 28px;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+  }
+  .hour-temp {
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  /* ── 7天预报卡片 ── */
+  .daily-card {
+    margin: 0 16px 16px;
+    background: rgba(255,255,255,0.10);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 20px;
+    padding: 18px 20px 14px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .daily-item {
+    display: flex;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .daily-item:last-child { border-bottom: none; }
+  .daily-day {
+    font-size: 13px;
+    color: rgba(255,255,255,0.6);
+    width: 48px;
+    flex-shrink: 0;
+    font-weight: 500;
+  }
+  .daily-icon {
+    width: 30px;
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .daily-icon img {
+    width: 22px;
+    height: 22px;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.1));
+  }
+  .daily-desc {
+    color: rgba(255,255,255,0.45);
+    font-size: 12px;
+    width: 48px;
+    flex-shrink: 0;
+  }
+  .daily-temp-bar {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+  .daily-temp-low {
+    color: rgba(255,255,255,0.4);
+    font-size: 12px;
+    width: 28px;
+    text-align: right;
+  }
+  .daily-bar-track {
+    width: 90px;
+    height: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+  }
+  .daily-bar-fill {
+    position: absolute;
+    height: 100%;
+    border-radius: 2px;
+  }
+  .daily-temp-high {
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    width: 28px;
+  }
+</style>
+</head>
+<body>
+  <!-- 主卡片 -->
+  <div class="main-card">
+    <div class="main-top">
+      <div>
+        <div class="location">{{CITY}}</div>
+        <div class="update-time">{{UPDATE_TIME}} 更新</div>
+      </div>
+    </div>
+    <div class="date-line">{{DATE_STR}}  {{WEATHER}}</div>
+    <div class="main-body">
+      <div class="temp-section">
+        <div class="temp-big">{{TEMP}}<span class="unit">°</span></div>
+        <div class="weather-label">{{WEATHER}}</div>
+      </div>
+      <div class="icon-area">{{ICON_MAIN}}</div>
+    </div>
+    <div class="detail-grid">
+      <div class="detail-item">
+        <div class="detail-label">体感温度</div>
+        <div class="detail-value">{{FEELS}}°</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">降水概率</div>
+        <div class="detail-value">{{RAIN}}%</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">风速</div>
+        <div class="detail-value">{{WIND}}</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">湿度</div>
+        <div class="detail-value">{{HUMIDITY}}%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 小时预报 -->
+  <div class="hourly-card">
+    <div class="section-title">未来 8 小时</div>
+    <div class="hourly-scroll">
+      {{HOURLY_ITEMS}}
+    </div>
+  </div>
+
+  <!-- 7天预报 -->
+  <div class="daily-card">
+    <div class="section-title">未来 7 天</div>
+    {{DAILY_ITEMS}}
+  </div>
+</body>
+</html>
