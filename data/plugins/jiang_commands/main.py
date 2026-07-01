@@ -7,6 +7,8 @@ import os
 import re
 import asyncio
 import logging
+import tempfile
+import time
 from pathlib import Path
 
 # 加载 ai_plugin/.env.prod（ALapi token 等配置）
@@ -21,6 +23,41 @@ from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
 
 logger = logging.getLogger("jiang_commands")
+
+_WEATHER_PATTERN = re.compile(r"^\s*(.+?)天气\s*$")
+_OILPRICE_PATTERN = re.compile(r"^\s*油价\s*(.+?)\s*$")
+
+
+def _strip_system_identity_prefix(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("[系统身份提示：") and "]\n" in cleaned:
+        cleaned = cleaned.split("]\n", 1)[1].lstrip()
+    return cleaned
+
+
+def _fetch_random_image(proxies: dict[str, str], attempts: int = 3, timeout: int = 30):
+    import requests as _req
+
+    last_response = None
+    for attempt in range(attempts):
+        resp = _req.get(
+            "https://xrw.christin3.com/api/random-photo",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/137.0.0.0 Safari/537.36"
+                )
+            },
+            proxies=proxies,
+            timeout=timeout,
+        )
+        last_response = resp
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            return resp
+        if attempt < attempts - 1:
+            time.sleep(2)
+    return last_response
 
 # NoneBot 桩（ai_plugin 依赖 nonebot）
 _PLUGINS_DIR = str(Path(__file__).resolve().parent.parent)
@@ -142,11 +179,13 @@ class Main(star.Star):
             yield event.plain_result(f"获取新闻失败: {e}")
 
     # ── /xx天气 ─────────────────────────────────────────
-    @filter.regex(r"^\s*(.+?)天气\s*$")
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def weather(self, event: AstrMessageEvent):
         """城市天气预报 — 图片卡片"""
-        text = event.get_message_str().strip()
-        m = re.match(r"^\s*(.+?)天气\s*$", text)
+        text = _strip_system_identity_prefix(event.get_message_str()).strip()
+        if text.startswith(("/", "\\")):
+            text = text[1:].strip()
+        m = _WEATHER_PATTERN.match(text)
         if not m:
             return
         place = m.group(1).strip()
@@ -200,11 +239,13 @@ class Main(star.Star):
             yield event.plain_result("V我50！")
 
     # ── /油价xx ────────────────────────────────────────
-    @filter.regex(r"^\s*油价\s*(.+?)\s*$")
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def oilprice(self, event: AstrMessageEvent):
         """今日油价"""
-        text = event.get_message_str().strip()
-        m = re.match(r"^\s*油价\s*(.+?)\s*$", text)
+        text = _strip_system_identity_prefix(event.get_message_str()).strip()
+        if text.startswith(("/", "\\")):
+            text = text[1:].strip()
+        m = _OILPRICE_PATTERN.match(text)
         if not m:
             return
         province = m.group(1).strip()
@@ -258,43 +299,62 @@ class Main(star.Star):
             yield event.plain_result("\n".join(lines))
 
     # ── 图来（随机图片，无需前缀） ─────────────────────
-    @filter.regex(r"^图来\s*$")
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def random_image(self, event: AstrMessageEvent):
         """发送随机图片，强匹配 '图来'，无需 / 或 @"""
-        import base64 as b64mod
-        import requests as _req
-        from astrbot.api.message_components import Image
+        text = _strip_system_identity_prefix(event.message_str).strip()
+        if text.startswith(("/", "\\")):
+            text = text[1:].strip()
+        if text != "图来":
+            return
+        event.stop_event()
         proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
         try:
-            resp = _req.get(
-                "https://boudoir.ortlinde.com/random",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"},
-                proxies=proxies,
-                timeout=15,
-            )
+            resp = _fetch_random_image(proxies, attempts=3, timeout=30)
             if resp.status_code == 200 and len(resp.content) > 1000:
-                b64 = b64mod.b64encode(resp.content).decode()
-                yield event.chain_result([Image.fromBase64(b64)])
-                # 10秒后自动撤回
-                asyncio.create_task(self._auto_recall(event, 60))
-            elif resp.status_code == 404:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                suffix = ".jpg"
+                if "png" in content_type:
+                    suffix = ".png"
+                elif "webp" in content_type:
+                    suffix = ".webp"
+                elif "gif" in content_type:
+                    suffix = ".gif"
+
+                with tempfile.NamedTemporaryFile(
+                    prefix="jiang_random_",
+                    suffix=suffix,
+                    delete=False,
+                ) as tmp:
+                    tmp.write(resp.content)
+                    tmp_path = tmp.name
+
+                yield event.image_result(tmp_path)
+                asyncio.create_task(self._auto_recall(event, 20))
+            elif resp is not None and resp.status_code == 404:
                 yield event.plain_result("图库空了，等会儿再来~")
             else:
-                yield event.plain_result(f"图片接口返回 {resp.status_code}，稍后再试")
+                status_code = getattr(resp, "status_code", "unknown")
+                yield event.plain_result(f"图片接口返回 {status_code}，稍后再试")
         except Exception as e:
             logger.exception(f"图来失败: {e}")
             yield event.plain_result("获取图片失败，网络开小差了")
 
     async def _auto_recall(self, event: AstrMessageEvent, delay: int):
-        """延迟后调用 recall_last_msg 撤回最近发送的消息"""
-        await asyncio.sleep(delay)
+        """图片发送后立即注册定时撤回（由微信注入层后台执行，不依赖 event.bot 长期存活）"""
+        chat_id = event.get_group_id() or event.get_sender_id()
+        if not chat_id:
+            logger.warning("[图来撤回] chat_id 为空，放弃")
+            return
         try:
-            chat_id = event.get_group_id() or event.get_sender_id()
-            if not chat_id:
-                return
             result = await event.bot.call_action(
-                "recall_last_msg", group_id=chat_id, user_id=chat_id,
+                "auto_recall_last_msg",
+                group_id=chat_id,
+                user_id=chat_id,
+                to_wxid=chat_id,
+                msg_type="image",
+                delay=delay,
             )
-            logger.info(f"[图来撤回] chat={chat_id}, result={result}")
+            logger.info(f"[图来撤回] 已注册: chat={chat_id}, delay={delay}s, result={result}")
         except Exception as e:
-            logger.error(f"[图来撤回] 失败: {e}")
+            logger.error(f"[图来撤回] 注册失败: {type(e).__name__}: {e}")

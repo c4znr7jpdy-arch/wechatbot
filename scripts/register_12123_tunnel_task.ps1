@@ -34,15 +34,24 @@ if ($IdentityFile.Trim()) {
     $argumentParts += @("-IdentityFile", "`"$IdentityFile`"")
 }
 
-$action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument ($argumentParts -join " ") `
-    -WorkingDirectory $projectRoot
+$hiddenVbs = Join-Path $PSScriptRoot "start_12123_reverse_tunnel_hidden.vbs"
+if (Test-Path -LiteralPath $hiddenVbs) {
+    $action = New-ScheduledTaskAction `
+        -Execute "wscript.exe" `
+        -Argument "`"$hiddenVbs`"" `
+        -WorkingDirectory $projectRoot
+} else {
+    $action = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument (("-WindowStyle Hidden " + ($argumentParts -join " ")).Trim()) `
+        -WorkingDirectory $projectRoot
+}
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
+    -Hidden `
     -RestartCount 999 `
     -RestartInterval (New-TimeSpan -Minutes 1)
 

@@ -126,6 +126,13 @@ group_id = int(session_id) if session_id.isdigit() else session_id
 File: `astrbot_venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py`
 WeChat user IDs are `wxid_xxx` strings. Wrap `int(m["data"]["qq"])` in try-except, skip `get_group_member_info` for non-numeric IDs, use `name` field from message segment instead.
 
+### WeChat Raw XML Send
+
+- DLL API `type=11214` is the CDN raw XML send interface.
+- Request shape: `{"type":11214,"data":{"to_wxid":"filehelper","content":"<appmsg ...>...</appmsg>"}}`.
+- Important: `content` should be the inner `<appmsg>` XML. Received app messages are often stored as full `<?xml?><msg><appmsg>...</appmsg>...</msg>` raw XML, but `type=11214` should be sent the extracted `<appmsg>...</appmsg>` portion.
+- Playable music cards are `<appmsg>` messages with `<type>3</type>`, a playable `<dataurl>`, and `<songalbumurl>` for cover art.
+
 ### Image Generation
 - **Dual backend**: MiniMax `image-01` + GPT-Image `gpt-image-2` (via `freeapi.dgbmc.top` proxy, API key in `.env.prod`)
 - **grok-imagine-image-lite** also available on `freeapi.dgbmc.top`, works well (fast, ~10s)
