@@ -1,4 +1,4 @@
-# 微信 AI 助手
+# wechat AI 助手
 
 基于 AstrBot + DeepSeek/mimo/Grok 的微信个人号 AI 回复机器人，OneBot V11 协议。
 
