@@ -109,17 +109,39 @@ def _clean_temp(value: object) -> str:
     return match.group(0) if match else text
 
 
-def _format_wind(value: object) -> str:
+def _format_sunrise(value: object) -> str:
     text = str(value or "").strip()
     if not text:
-        return "8 km/h"
-    text = text.replace("KM/H", "km/h").replace("Km/h", "km/h").replace("公里/小时", "km/h")
-    if "km/h" in text:
-        return text.replace("km/h", " km/h")
-    match = re.search(r"\d+(?:\.\d+)?", text)
+        return "--"
+    match = re.search(r"(\d{1,2}:\d{2})", text)
     if match:
-        return f"{match.group(0)} km/h"
+        return match.group(1)
     return text
+
+
+def _sunrise_from_entry(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    suntimes = entry.get("suntimes") or {}
+    if isinstance(suntimes, dict):
+        sunrise = str(suntimes.get("sunrise") or "").strip()
+        if sunrise:
+            return sunrise
+    return str(entry.get("sunrise") or "").strip()
+
+
+def _daily_sunrise_text(apihz_data: dict, day_index: int, day_data: dict | None = None) -> str:
+    sunrise = _sunrise_from_entry(day_data or {})
+    if sunrise:
+        return sunrise
+
+    suntimes = apihz_data.get("suntimes") or []
+    if isinstance(suntimes, list) and 0 <= day_index - 1 < len(suntimes):
+        return _sunrise_from_entry(suntimes[day_index - 1])
+    if isinstance(suntimes, dict):
+        return _sunrise_from_entry(suntimes)
+
+    return _sunrise_from_entry(apihz_data if day_index == 1 else {})
 
 
 def _date_range_label(start: datetime, days: int = 7) -> str:
@@ -167,7 +189,6 @@ def _build_html(alapi_data: dict, apihz_data: dict | None) -> str:
     city = alapi_data.get("city", "")
     weather = alapi_data.get("weather", "")
     weather_code = alapi_data.get("weather_code", "duoyun")
-    wind_speed = _format_wind(alapi_data.get("wind_speed", ""))
     live_temp = _clean_temp(alapi_data.get("temp", ""))
     if apihz_data and apihz_data.get("code") == 200:
         nowinfo = apihz_data.get("nowinfo") or {}
@@ -185,7 +206,7 @@ def _build_html(alapi_data: dict, apihz_data: dict | None) -> str:
             "weather_code": weather_code,
             "high": alapi_data.get("temp", "0"),
             "low": alapi_data.get("temp", "0"),
-            "wind": wind_speed,
+            "sunrise": "",
         })
     weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     daily_columns = []
@@ -197,7 +218,7 @@ def _build_html(alapi_data: dict, apihz_data: dict | None) -> str:
         d_theme = _weather_theme(d_code, d_weather)
         high = _clean_temp(d.get("high", ""))
         low = _clean_temp(d.get("low", ""))
-        day_wind = _format_wind(d.get("wind") or wind_speed)
+        sunrise = _format_sunrise(d.get("sunrise"))
         d_icon = _icon_img_tag(d_code, 112)
         weather_title = html_lib.escape(d_weather)
         daily_columns.append(f'''<div class="forecast-col weather-{d_theme}" title="{weather_title}">
@@ -208,9 +229,9 @@ def _build_html(alapi_data: dict, apihz_data: dict | None) -> str:
           <div class="high">{high}°</div>
           <div class="low">{low}°</div>
         </div>
-        <div class="wind">
-          <div class="wind-mark"><span></span></div>
-          <div class="wind-label">风速<br>{html_lib.escape(day_wind)}</div>
+        <div class="sunrise">
+          <div class="sunrise-mark"><span></span></div>
+          <div class="sunrise-label">日出<br>{html_lib.escape(sunrise)}</div>
         </div>
       </div>''')
 
@@ -270,6 +291,15 @@ async def render_weather_image(alapi_data: dict, apihz_data: dict | None = None)
         alarms = apihz_data.get("alarm") or []
         cache_key += "|" + str(nowinfo.get("temperature", ""))
         cache_key += "|" + "|".join(str((a or {}).get("title", "")) for a in alarms[:2])
+        cache_key += "|" + datetime.now().strftime("%Y-%m-%d")
+        cache_key += "|" + "|".join(
+            _daily_sunrise_text(
+                apihz_data,
+                i,
+                apihz_data if i == 1 else apihz_data.get(f"weatherday{i}") or {},
+            )
+            for i in range(1, 8)
+        )
     cached = _get_cache(cache_key)
     if cached:
         return cached
@@ -295,7 +325,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                     "weather_code": _map_apihz_code(apihz_data.get("weather1img", "")),
                     "high": apihz_data.get("wd1", "0"),
                     "low": apihz_data.get("wd2", "0"),
-                    "wind": apihz_data.get("wind") or apihz_data.get("wind1") or apihz_data.get("fx1") or apihz_data.get("fl1", ""),
+                    "sunrise": _daily_sunrise_text(apihz_data, i, apihz_data),
                 }
             else:
                 dd = apihz_data.get(f"weatherday{i}")
@@ -306,7 +336,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                     "weather_code": _map_apihz_code(dd.get("weather1img", "")),
                     "high": dd.get("wd1", "0"),
                     "low": dd.get("wd2", "0"),
-                    "wind": dd.get("wind") or dd.get("wind1") or dd.get("fx1") or dd.get("fl1", ""),
+                    "sunrise": _daily_sunrise_text(apihz_data, i, dd),
                 }
             days.append(day)
     else:
@@ -326,7 +356,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                 "weather_code": wea_code,
                 "high": str(max(temps)) if temps else "0",
                 "low": str(min(temps)) if temps else "0",
-                "wind": hrs[0].get("wind_speed", "") if hrs else "",
+                "sunrise": "",
             })
     return days
 

@@ -1471,7 +1471,7 @@ def add_callback_handler(callbackHandler):
             _GLOBAL_CLOSE_CALLBACK_LIST.append(handler)
 
 # 专门拦截群成员变化的缓存
-_GROUP_MEMBER_CACHE = {}  # format: {room_wxid: {wxid: {"nickname": str, "avatar": str}}}
+_GROUP_MEMBER_CACHE = {}  # format: {room_wxid: {wxid: {"nickname": str, "display_name": str, "avatar": str}}}
 _USER_ALIAS_CACHE = None
 _GROUP_MEMBER_CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "group_members.json")
 _GROUP_MEMBER_ALIASES_CACHE = None
@@ -1520,6 +1520,26 @@ def _member_display_name(info: dict) -> str:
     if not isinstance(info, dict):
         return ""
     return info.get("display_name") or info.get("nickname") or info.get("remark") or ""
+
+def _member_identity(info: dict, fallback: dict | None = None) -> dict:
+    fallback = fallback if isinstance(fallback, dict) else {}
+    info = info if isinstance(info, dict) else {}
+    nickname = str(info.get("nickname") or fallback.get("nickname") or "")
+    display_name = str(
+        info.get("display_name")
+        or fallback.get("display_name")
+        or info.get("remark")
+        or fallback.get("remark")
+        or nickname
+        or ""
+    )
+    avatar = str(info.get("avatar") or fallback.get("avatar") or "")
+    return {
+        "nickname": nickname,
+        "display_name": display_name,
+        "avatar": avatar,
+        "remark": str(info.get("remark") or fallback.get("remark") or ""),
+    }
 
 def _upsert_group_member(room_wxid: str, member: dict) -> None:
     if not room_wxid or not isinstance(member, dict):
@@ -1871,6 +1891,7 @@ class WeChatServiceHandler:
                 old_nickname = _member_display_name(old_entry) if isinstance(old_entry, dict) else old_entry
                 old_avatar = old_entry.get("avatar", "") if isinstance(old_entry, dict) else ""
                 _upsert_group_member(room_wxid, member)
+                member_identity = _member_identity(_GROUP_MEMBER_CACHE[room_wxid].get(wxid), member)
                 new_nickname = _lookup_member_nickname(room_wxid, wxid) or nickname
                 
                 if old_nickname is not None:
@@ -1892,9 +1913,10 @@ class WeChatServiceHandler:
                             "group_id": room_wxid,
                             "user_id": wxid,
                             "operator_id": invite_by or 0,
-                            "wx_nickname": nickname,
+                            "wx_nickname": member_identity["nickname"] or nickname,
+                            "wx_display_name": member_identity["display_name"] or nickname,
                             "wx_group_name": group_name,
-                            "wx_avatar": old_avatar,
+                            "wx_avatar": member_identity["avatar"] or old_avatar,
                         }
                         asyncio.run_coroutine_threadsafe(astrbot_ws.send_event(event_data), astrbot_ws._loop)
                         
@@ -1920,12 +1942,12 @@ class WeChatServiceHandler:
                     wxid = member.get("wxid", "")
                     nickname = member.get("nickname", "")
                     
-                    # 在删除缓存之前，先取出头像
-                    cached_avatar = ""
+                    # 在删除缓存之前，先取出群备注、本身昵称和头像
+                    member_identity = _member_identity({}, member)
                     if room_wxid in _GROUP_MEMBER_CACHE and wxid in _GROUP_MEMBER_CACHE[room_wxid]:
                         cached_entry = _GROUP_MEMBER_CACHE[room_wxid][wxid]
                         if isinstance(cached_entry, dict):
-                            cached_avatar = cached_entry.get("avatar", "")
+                            member_identity = _member_identity(cached_entry, member)
                         del _GROUP_MEMBER_CACHE[room_wxid][wxid]
                         _save_group_member_cache()
                         
@@ -1940,9 +1962,10 @@ class WeChatServiceHandler:
                             "group_id": room_wxid,
                             "user_id": wxid,
                             "operator_id": data.get("manager_wxid", 0),
-                            "wx_nickname": nickname,
+                            "wx_nickname": member_identity["nickname"] or nickname,
+                            "wx_display_name": member_identity["display_name"] or nickname,
                             "wx_group_name": group_name,
-                            "wx_avatar": cached_avatar,
+                            "wx_avatar": member_identity["avatar"],
                         }
                         asyncio.run_coroutine_threadsafe(astrbot_ws.send_event(event_data), astrbot_ws._loop)
 

@@ -85,7 +85,7 @@ async def fetch_weather(place: str, sheng: str = "", days: int = 7) -> dict:
                 "place": place,
                 "day": str(days),
                 "hourtype": "0",
-                "suntimetype": "0",
+                "suntimetype": "1",
             }
             if sheng:
                 params["sheng"] = sheng
