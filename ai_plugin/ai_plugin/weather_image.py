@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import html as html_lib
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta
 
@@ -75,105 +78,148 @@ def _get_icon_name(weather_code: str) -> str:
         return "cloud"
 
 
+def _weather_theme(weather_code: str, weather_text: str) -> str:
+    code = (weather_code or "").lower()
+    text = weather_text or ""
+
+    if any(k in code for k in ("lei", "thunder")) or "雷" in text:
+        return "thunder"
+    if any(k in code for k in ("xue", "snow")) or "雪" in text:
+        return "snow"
+    if (
+        ("yu" in code and "duoyun" not in code)
+        or any(k in code for k in ("rain", "shower"))
+        or "雨" in text
+    ):
+        return "rain"
+    if any(k in code for k in ("wu", "mai", "fog", "haze")) or any(k in text for k in ("雾", "霾", "沙尘")):
+        return "fog"
+    if any(k in code for k in ("yin", "overcast")) or "阴" in text:
+        return "overcast"
+    if any(k in code for k in ("duoyun", "partly")) or "多云" in text:
+        return "partly"
+    if any(k in code for k in ("qing", "sun", "clear")) or "晴" in text:
+        return "sunny"
+    return "partly"
+
+
+def _clean_temp(value: object) -> str:
+    text = str(value or "").replace("℃", "").replace("°", "").strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return match.group(0) if match else text
+
+
+def _format_wind(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "8 km/h"
+    text = text.replace("KM/H", "km/h").replace("Km/h", "km/h").replace("公里/小时", "km/h")
+    if "km/h" in text:
+        return text.replace("km/h", " km/h")
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if match:
+        return f"{match.group(0)} km/h"
+    return text
+
+
+def _date_range_label(start: datetime, days: int = 7) -> str:
+    end = start + timedelta(days=days - 1)
+    if start.month == end.month:
+        return f"{start.month}月{start.day}日-{end.day}日"
+    return f"{start.month}月{start.day}日-{end.month}月{end.day}日"
+
+
+def _extract_alarm_brief(title: str) -> str:
+    match = re.search(r"发布(.+)$", title or "")
+    brief = match.group(1) if match else (title or "")
+    brief = re.sub(r"\s+", " ", brief).strip()
+    warning_match = re.search(r"(.+?预警)", brief)
+    if warning_match:
+        return warning_match.group(1)
+    return brief[:8] if len(brief) > 8 else brief
+
+
+def _alert_payload(apihz_data: dict | None) -> tuple[str, str]:
+    alarms = []
+    if apihz_data and apihz_data.get("code") == 200:
+        alarms = apihz_data.get("alarm") or []
+    if not alarms:
+        return "none", "暂无预警"
+
+    title = str((alarms[0] or {}).get("title", "")).strip()
+    text = _extract_alarm_brief(title) or "Weather Alert"
+    severity = "active"
+    if "红色" in title or "红" in title:
+        severity = "red"
+    elif "橙色" in title or "橙" in title:
+        severity = "orange"
+    elif "黄色" in title or "黄" in title:
+        severity = "yellow"
+    elif "蓝色" in title or "蓝" in title:
+        severity = "blue"
+    return severity, text
+
+
 # ── 构建 HTML ────────────────────────────────────────
 def _build_html(alapi_data: dict, apihz_data: dict | None) -> str:
     html = _load_html_template()
 
     city = alapi_data.get("city", "")
     weather = alapi_data.get("weather", "")
-    temp = str(alapi_data.get("temp", ""))
-    feels = temp
+    weather_code = alapi_data.get("weather_code", "duoyun")
+    wind_speed = _format_wind(alapi_data.get("wind_speed", ""))
+    live_temp = _clean_temp(alapi_data.get("temp", ""))
     if apihz_data and apihz_data.get("code") == 200:
         nowinfo = apihz_data.get("nowinfo") or {}
-        feels = str(nowinfo.get("feelst", temp))
-    weather_code = alapi_data.get("weather_code", "duoyun")
-    rain = alapi_data.get("rain", "0")
-    humidity = alapi_data.get("humidity", "").replace("%", "")
-    wind_speed = alapi_data.get("wind_speed", "").replace("km/h", "")
-    update = alapi_data.get("update_time", "")[-8:][:5]
+        live_temp = _clean_temp(nowinfo.get("temperature") or live_temp)
+    alert_severity, alert_text = _alert_payload(apihz_data)
 
     today = datetime.now()
-    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    date_str = f"{today.month}月{today.day}日 {weekdays[today.weekday()]}"
-
-    icon_main = _icon_img_tag(weather_code, 120)
-
-    # 小时预报
-    hours = alapi_data.get("hour", [])[:7]
-    now_hour = datetime.now().hour
-    hourly_items = []
-    for i, h in enumerate(hours):
-        time_str = h.get("time", "")
-        try:
-            hour = int(time_str[11:13])
-        except (ValueError, IndexError):
-            hour = now_hour + i
-        label = "现在" if i == 0 else f"{hour}:00"
-        h_temp = str(h.get("temp", ""))
-        h_code = h.get("wea_code", "duoyun")
-        h_icon = _icon_img_tag(h_code, 28)
-        active = ' class="active"' if i == 0 else ""
-        hourly_items.append(f'''<div class="hour-item{active}">
-        <div class="hour-time">{label}</div>
-        <div class="hour-icon">{h_icon}</div>
-        <div class="hour-temp">{h_temp}°</div>
-      </div>''')
+    subtitle = f"{city} · {_date_range_label(today)}"
 
     # 7天预报
     daily_days = _build_daily_days(apihz_data, alapi_data)
-    all_temps = []
-    for d in daily_days[:7]:
-        try:
-            all_temps.append(int(d.get("low", 20)))
-            all_temps.append(int(d.get("high", 30)))
-        except (ValueError, TypeError):
-            pass
-    t_min = min(all_temps) if all_temps else 15
-    t_max = max(all_temps) if all_temps else 35
-    t_range = t_max - t_min if t_max != t_min else 1
-
-    weekdays_list = ["今天", "明天"]
-    for i in range(2, 7):
-        dt = datetime.now() + timedelta(days=i)
-        weekdays_list.append(["周一", "周二", "周三", "周四", "周五", "周六", "周日"][dt.weekday()])
-
-    daily_items = []
+    while len(daily_days) < 7:
+        daily_days.append({
+            "weather": weather,
+            "weather_code": weather_code,
+            "high": alapi_data.get("temp", "0"),
+            "low": alapi_data.get("temp", "0"),
+            "wind": wind_speed,
+        })
+    weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    daily_columns = []
     for i, d in enumerate(daily_days[:7]):
-        day_label = weekdays_list[i] if i < len(weekdays_list) else f"第{i+1}天"
+        dt = today + timedelta(days=i)
+        day_label = weekday_names[dt.weekday()]
         d_weather = d.get("weather", "")
         d_code = d.get("weather_code", "duoyun")
-        try:
-            low = int(d.get("low", 0))
-            high = int(d.get("high", 0))
-        except (ValueError, TypeError):
-            low, high = 0, 0
-        d_icon = _icon_img_tag(d_code, 22)
-        fl = int((low - t_min) / t_range * 90)
-        fw = max(8, int((high - low) / t_range * 90))
-        bar_style = f"left:{fl}px;width:{fw}px;background:{_bar_gradient(low, high, t_min, t_range)}"
-        daily_items.append(f'''<div class="daily-item">
-        <div class="daily-day">{day_label}</div>
-        <div class="daily-icon">{d_icon}</div>
-        <div class="daily-desc">{d_weather}</div>
-        <div class="daily-temp-bar">
-          <div class="daily-temp-low">{low}°</div>
-          <div class="daily-bar-track"><div class="daily-bar-fill" style="{bar_style}"></div></div>
-          <div class="daily-temp-high">{high}°</div>
+        d_theme = _weather_theme(d_code, d_weather)
+        high = _clean_temp(d.get("high", ""))
+        low = _clean_temp(d.get("low", ""))
+        day_wind = _format_wind(d.get("wind") or wind_speed)
+        d_icon = _icon_img_tag(d_code, 112)
+        weather_title = html_lib.escape(d_weather)
+        daily_columns.append(f'''<div class="forecast-col weather-{d_theme}" title="{weather_title}">
+        <div class="day">{day_label}</div>
+        <div class="date">{dt.day}</div>
+        <div class="icon-wrap">{d_icon}</div>
+        <div class="temps">
+          <div class="high">{high}°</div>
+          <div class="low">{low}°</div>
+        </div>
+        <div class="wind">
+          <div class="wind-mark"><span></span></div>
+          <div class="wind-label">风速<br>{html_lib.escape(day_wind)}</div>
         </div>
       </div>''')
 
-    html = html.replace("{{CITY}}", city)
-    html = html.replace("{{UPDATE_TIME}}", update)
-    html = html.replace("{{DATE_STR}}", date_str)
-    html = html.replace("{{WEATHER}}", weather)
-    html = html.replace("{{TEMP}}", temp)
-    html = html.replace("{{ICON_MAIN}}", icon_main)
-    html = html.replace("{{FEELS}}", feels)
-    html = html.replace("{{RAIN}}", rain)
-    html = html.replace("{{WIND}}", f"{wind_speed}km/h")
-    html = html.replace("{{HUMIDITY}}", humidity)
-    html = html.replace("{{HOURLY_ITEMS}}", "\n      ".join(hourly_items))
-    html = html.replace("{{DAILY_ITEMS}}", "\n    ".join(daily_items))
+    html = html.replace("{{SUBTITLE}}", html_lib.escape(subtitle))
+    html = html.replace("{{LIVE_TEMP}}", html_lib.escape(live_temp or "--"))
+    html = html.replace("{{LIVE_WEATHER}}", html_lib.escape(weather or "实时天气"))
+    html = html.replace("{{ALERT_SEVERITY}}", html_lib.escape(alert_severity))
+    html = html.replace("{{ALERT_TEXT}}", html_lib.escape(alert_text))
+    html = html.replace("{{DAILY_COLUMNS}}", "\n      ".join(daily_columns))
 
     return html
 
@@ -183,11 +229,12 @@ async def _render_to_png(html: str, output_path: str) -> None:
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(viewport={"width": 480, "height": 900}, device_scale_factor=2)
+        page = await browser.new_page(viewport={"width": 1280, "height": 720}, device_scale_factor=2)
         await page.set_content(html, wait_until="networkidle")
+        await page.evaluate("document.fonts && document.fonts.ready")
         await page.wait_for_timeout(800)
         height = await page.evaluate("document.body.scrollHeight")
-        await page.set_viewport_size({"width": 480, "height": height})
+        await page.set_viewport_size({"width": 1280, "height": height})
         await page.screenshot(path=output_path, full_page=True)
         await browser.close()
 
@@ -214,17 +261,27 @@ def _set_cache(city: str, path: str) -> None:
 # ── 公开接口 ──────────────────────────────────────────
 async def render_weather_image(alapi_data: dict, apihz_data: dict | None = None) -> str:
     city = alapi_data.get("city", "")
-    cached = _get_cache(city)
+    cache_key = "|".join(
+        str(alapi_data.get(k, ""))
+        for k in ("city", "weather", "weather_code", "temp")
+    )
+    if apihz_data:
+        nowinfo = apihz_data.get("nowinfo") or {}
+        alarms = apihz_data.get("alarm") or []
+        cache_key += "|" + str(nowinfo.get("temperature", ""))
+        cache_key += "|" + "|".join(str((a or {}).get("title", "")) for a in alarms[:2])
+    cached = _get_cache(cache_key)
     if cached:
         return cached
 
     html = _build_html(alapi_data, apihz_data)
 
     tmp_dir = tempfile.gettempdir()
-    path = os.path.join(tmp_dir, f"weather_{city}.png")
+    file_key = hashlib.md5(cache_key.encode("utf-8")).hexdigest()[:12]
+    path = os.path.join(tmp_dir, f"weather_{file_key}.png")
     await _render_to_png(html, path)
 
-    _set_cache(city, path)
+    _set_cache(cache_key, path)
     return path
 
 
@@ -238,6 +295,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                     "weather_code": _map_apihz_code(apihz_data.get("weather1img", "")),
                     "high": apihz_data.get("wd1", "0"),
                     "low": apihz_data.get("wd2", "0"),
+                    "wind": apihz_data.get("wind") or apihz_data.get("wind1") or apihz_data.get("fx1") or apihz_data.get("fl1", ""),
                 }
             else:
                 dd = apihz_data.get(f"weatherday{i}")
@@ -248,6 +306,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                     "weather_code": _map_apihz_code(dd.get("weather1img", "")),
                     "high": dd.get("wd1", "0"),
                     "low": dd.get("wd2", "0"),
+                    "wind": dd.get("wind") or dd.get("wind1") or dd.get("fx1") or dd.get("fl1", ""),
                 }
             days.append(day)
     else:
@@ -267,6 +326,7 @@ def _build_daily_days(apihz_data: dict | None, alapi_data: dict) -> list[dict]:
                 "weather_code": wea_code,
                 "high": str(max(temps)) if temps else "0",
                 "low": str(min(temps)) if temps else "0",
+                "wind": hrs[0].get("wind_speed", "") if hrs else "",
             })
     return days
 

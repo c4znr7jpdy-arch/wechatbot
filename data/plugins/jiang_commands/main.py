@@ -329,9 +329,11 @@ class Main(star.Star):
                     tmp.write(resp.content)
                     tmp_path = tmp.name
 
-                logger.info("[图来撤回] scheduling before image_result yield")
-                asyncio.create_task(self._auto_recall(event, 20))
-                yield event.image_result(tmp_path)
+                sent = await self._send_random_image_with_recall(event, tmp_path, 20)
+                if not sent:
+                    logger.info("[图来撤回] direct send failed; fallback to image_result + recall registration")
+                    asyncio.create_task(self._auto_recall(event, 20))
+                    yield event.image_result(tmp_path)
             elif resp is not None and resp.status_code == 404:
                 yield event.plain_result("图库空了，等会儿再来~")
             else:
@@ -358,4 +360,29 @@ class Main(star.Star):
             )
             logger.info(f"[图来撤回] 已注册: chat={chat_id}, delay={delay}s, result={result}")
         except Exception as e:
-            logger.error(f"[图来撤回] 注册失败: {type(e).__name__}: {e}")
+            if type(e).__name__ == "ApiNotAvailable":
+                logger.debug("[图来撤回] OneBot API not ready; skip auto recall")
+                return
+            logger.warning(f"[图来撤回] 注册失败: {type(e).__name__}: {e}")
+
+    async def _send_random_image_with_recall(
+        self, event: AstrMessageEvent, image_path: str, delay: int
+    ) -> bool:
+        """Send through the OneBot adapter so the WeChat layer can bind a trace before recall."""
+        try:
+            message = [{"type": "image", "data": {"file": image_path}}]
+            payload = {"message": message, "auto_recall_delay": delay}
+            if event.get_group_id():
+                payload["group_id"] = event.get_group_id()
+                result = await event.bot.call_action("send_group_msg", **payload)
+            else:
+                payload["user_id"] = event.get_sender_id()
+                result = await event.bot.call_action("send_private_msg", **payload)
+            logger.info(f"[图来撤回] direct send registered: delay={delay}s, result={result}")
+            return True
+        except Exception as e:
+            if type(e).__name__ == "ApiNotAvailable":
+                logger.debug("[图来撤回] OneBot API not ready for direct send")
+                return False
+            logger.warning(f"[图来撤回] direct send failed: {type(e).__name__}: {e}")
+            return False

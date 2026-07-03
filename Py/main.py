@@ -375,6 +375,8 @@ class AstrBotWsClient:
                 else:
                     to_wxid = None
 
+                auto_recall_delay = int(msg_data.get("auto_recall_delay", 0) or 0)
+
                 # 发送消息
                 sent = False
                 if text_content and to_wxid:
@@ -414,7 +416,7 @@ class AstrBotWsClient:
                             tmp.write(image_data)
                             image_path = tmp.name
                         try:
-                            self._send_image(to_wxid, image_path)
+                            self._send_image(to_wxid, image_path, auto_recall_delay=auto_recall_delay)
                             logger.info(f"AI 图片回复: {image_path}")
                             sent = True
                         finally:
@@ -423,7 +425,7 @@ class AstrBotWsClient:
                             except:
                                 pass
                     elif isinstance(image_data, str) and os_module.path.exists(image_data):
-                        self._send_image(to_wxid, image_data)
+                        self._send_image(to_wxid, image_data, auto_recall_delay=auto_recall_delay)
                         logger.info(f"AI 图片回复 (path): {image_data}")
                         sent = True
                     elif isinstance(image_data, str):
@@ -475,6 +477,7 @@ class AstrBotWsClient:
             # V11: send_group_msg / send_private_msg / forward messages
             if action in ("send_group_msg", "send_private_msg", "send_group_forward_msg", "send_private_forward_msg") and is_api_request:
                 messages = msg_data.get("message", [])
+                auto_recall_delay = int(msg_data.get("auto_recall_delay", 0) or 0)
                 if action in ("send_group_forward_msg", "send_private_forward_msg"):
                     text_content = self._extract_forward_text(messages)
                     image_data = None
@@ -513,13 +516,13 @@ class AstrBotWsClient:
                             tmp.write(image_data)
                             image_path = tmp.name
                         try:
-                            self._send_image(to_wxid, image_path)
+                            self._send_image(to_wxid, image_path, auto_recall_delay=auto_recall_delay)
                             sent = True
                         finally:
                             try: os_module.remove(image_path)
                             except: pass
                     elif isinstance(image_data, str) and os_module.path.exists(image_data):
-                        self._send_image(to_wxid, image_data)
+                        self._send_image(to_wxid, image_data, auto_recall_delay=auto_recall_delay)
                         sent = True
                 video_path = self._extract_video(messages)
                 if video_path and to_wxid and os_module.path.exists(video_path):
@@ -1214,7 +1217,7 @@ class AstrBotWsClient:
                         return voice_path
         return None
 
-    def _send_image(self, to_wxid: str, image_path: str):
+    def _send_image(self, to_wxid: str, image_path: str, auto_recall_delay: int = 0):
         """发送图片消息（type=11040）"""
         import os as os_module
         if not os_module.path.exists(image_path):
@@ -1223,7 +1226,7 @@ class AstrBotWsClient:
 
         if self.send_image_fn:
             try:
-                result = self.send_image_fn(to_wxid, image_path)
+                result = self.send_image_fn(to_wxid, image_path, auto_recall_delay=auto_recall_delay)
                 logger.info(f"图片发送结果: {result}")
                 return result
             except Exception as e:
@@ -3631,7 +3634,9 @@ def main():
         host="127.0.0.1",
         port=6199,
         send_text_fn=lambda to_wxid, content: service.helper_send_text(to_wxid, content),
-        send_image_fn=lambda to_wxid, image_path: service.helper_send_image(to_wxid, image_path),
+        send_image_fn=lambda to_wxid, image_path, auto_recall_delay=0: service.helper_send_image(
+            to_wxid, image_path, auto_recall_delay=auto_recall_delay
+        ),
         send_emoji_fn=lambda to_wxid, image_path: service.helper_send_emoji(to_wxid, image_path),
         send_video_fn=lambda to_wxid, video_path: service.helper_send_video(to_wxid, video_path),
         send_voice_fn=lambda to_wxid, voice_path: service.helper_send_voice(to_wxid, voice_path),

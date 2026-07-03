@@ -2,6 +2,7 @@
 多后端图片生成模块 — Minimax / GPT-Image
 API 流程: submit(同步) → download → 返回本地路径列表
 """
+import asyncio
 import base64
 import re
 import time
@@ -234,6 +235,144 @@ class GPTImageGenerator:
         return paths
 
 
+class GRSAIImageGenerator:
+    """GRS draw completions backend for gpt-image-2."""
+
+    def __init__(self, api_key: str, base_url: str = "https://grsai.dakka.com.cn",
+                 model: str = "gpt-image-2", quality: str = "auto",
+                 image_dir: Path | None = None):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.quality = quality
+        self.image_dir = image_dir or IMAGE_DIR
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+
+    async def generate(self, prompt: str, n: int = 1, aspect_ratio: str = "1:1",
+                       prompt_optimizer: bool = True) -> list[str]:
+        return await self.generate_from_urls(prompt, [], n=n, aspect_ratio=aspect_ratio)
+
+    async def generate_from_urls(self, prompt: str, urls: list[str] | None = None,
+                                 n: int = 1, aspect_ratio: str = "1:1") -> list[str]:
+        size = ASPECT_TO_SIZE.get(aspect_ratio, "1024x1024")
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "aspectRatio": size,
+            "quality": self.quality,
+            "webHook": "-1",
+            "shutProgress": True,
+        }
+        if urls:
+            payload["urls"] = urls
+
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
+            request_started = time.monotonic()
+            resp = await client.post(
+                f"{self.base_url}/v1/draw/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            logger.info(
+                f"[IMAGE] GRS draw request finished in {time.monotonic() - request_started:.1f}s, "
+                f"model={self.model}, status={resp.status_code}, base={self.base_url}"
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"GPT2 图片任务提交失败: {resp.status_code} {resp.text}")
+            submit_data = resp.json()
+            self._raise_api_error(submit_data, "GPT2 图片任务提交失败")
+            task_id = self._extract_task_id(submit_data)
+            if not task_id:
+                result = self._extract_result(submit_data)
+                if result and self._result_urls(result):
+                    return await self._save_result_images(result)
+                raise RuntimeError(f"GPT2 未返回任务 ID: {submit_data}")
+            result = await self._poll_result(client, task_id)
+
+        return await self._save_result_images(result)
+
+    async def _poll_result(self, client: httpx.AsyncClient, task_id: str) -> dict:
+        deadline = time.monotonic() + 300
+        last_data = None
+        while time.monotonic() < deadline:
+            resp = await client.post(
+                f"{self.base_url}/v1/draw/result",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"id": task_id},
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"GPT2 查询结果失败: {resp.status_code} {resp.text}")
+            last_data = resp.json()
+            self._raise_api_error(last_data, "GPT2 查询结果失败")
+            result = self._extract_result(last_data) or {}
+            status = str(result.get("status", "")).lower()
+            progress = result.get("progress")
+            if status == "succeeded" or self._result_urls(result):
+                logger.info(f"[IMAGE] GRS draw succeeded, id={task_id}, progress={progress}")
+                return result
+            if status == "failed":
+                reason = result.get("failure_reason") or result.get("error") or last_data
+                raise RuntimeError(f"GPT2 图片生成失败: {reason}")
+            logger.info(f"[IMAGE] GRS draw running, id={task_id}, status={status}, progress={progress}")
+            await asyncio.sleep(3)
+        raise RuntimeError(f"GPT2 图片生成超时: id={task_id}, last={last_data}")
+
+    async def _save_result_images(self, result: dict) -> list[str]:
+        urls = self._result_urls(result)
+        if not urls:
+            raise RuntimeError(f"GPT2 未获取到图片 URL: {result}")
+        paths = []
+        download_started = time.monotonic()
+        for i, url in enumerate(urls):
+            if url.startswith("data:"):
+                paths.append(_save_data_uri(url, self.image_dir, i))
+            else:
+                paths.append(await download_async(url, self.image_dir, i))
+        logger.info(
+            f"[IMAGE] GRS image download/save finished in {time.monotonic() - download_started:.1f}s"
+        )
+        return paths
+
+    @staticmethod
+    def _extract_task_id(data: dict) -> str | None:
+        inner = data.get("data") if isinstance(data, dict) else None
+        if isinstance(inner, dict) and inner.get("id"):
+            return str(inner["id"])
+        if isinstance(data, dict) and data.get("id"):
+            return str(data["id"])
+        return None
+
+    @staticmethod
+    def _extract_result(data: dict) -> dict | None:
+        if not isinstance(data, dict):
+            return None
+        inner = data.get("data")
+        if isinstance(inner, dict) and any(k in inner for k in ("status", "results", "url", "progress")):
+            return inner
+        if any(k in data for k in ("status", "results", "url", "progress")):
+            return data
+        return None
+
+    @staticmethod
+    def _result_urls(result: dict) -> list[str]:
+        urls = []
+        for item in result.get("results") or []:
+            if isinstance(item, dict) and item.get("url"):
+                urls.append(str(item["url"]))
+        if not urls and result.get("url"):
+            urls.append(str(result["url"]))
+        return urls
+
+    @staticmethod
+    def _raise_api_error(data: dict, prefix: str) -> None:
+        if not isinstance(data, dict):
+            return
+        code = data.get("code")
+        if code not in (None, 0):
+            msg = data.get("msg") or data.get("message") or data
+            raise RuntimeError(f"{prefix}: code={code}, msg={msg}")
+
+
 def _save_b64_image(b64_data: str, image_dir: Path, index: int = 0) -> str:
     """将 base64 编码的图片数据保存为本地文件"""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -267,8 +406,8 @@ def _save_data_uri(data_uri: str, image_dir: Path, index: int = 0) -> str:
 
 # ---- 全局状态 ----
 
-_generators: dict[str, MiniMaxImageGenerator | GPTImageGenerator] = {}
-_active_model: str = "gpt"
+_generators: dict[str, MiniMaxImageGenerator | GPTImageGenerator | GRSAIImageGenerator] = {}
+_active_model: str = "gpt2"
 
 
 def init_image_generators(
@@ -278,18 +417,33 @@ def init_image_generators(
     gpt_api_key: str = "",
     gpt_base_url: str = "http://freeapi.dgbmc.top",
     gpt_model: str = "gpt-image-2",
+    gpt2_api_key: str = "",
+    gpt2_base_url: str = "https://grsai.dakka.com.cn",
+    gpt2_model: str = "gpt-image-2",
+    gpt2_quality: str = "auto",
 ) -> None:
-    global _generators
+    global _generators, _active_model
+    _generators = {}
     if minimax_api_key:
         _generators["minimax"] = MiniMaxImageGenerator(
             api_key=minimax_api_key, base_url=minimax_base_url, model=minimax_model
         )
         logger.info("[IMAGE] MiniMax 后端已就绪")
     if gpt_api_key:
-        _generators["gpt"] = GPTImageGenerator(
+        _generators["gpt1"] = GPTImageGenerator(
             api_key=gpt_api_key, base_url=gpt_base_url, model=gpt_model
         )
-        logger.info("[IMAGE] GPT-Image 后端已就绪")
+        logger.info("[IMAGE] GPT1 后端已就绪")
+    if gpt2_api_key:
+        _generators["gpt2"] = GRSAIImageGenerator(
+            api_key=gpt2_api_key, base_url=gpt2_base_url, model=gpt2_model, quality=gpt2_quality
+        )
+        logger.info("[IMAGE] GPT2 GRS 后端已就绪")
+    if _active_model not in _generators and _generators:
+        for preferred in ("gpt2", "gpt1", "minimax"):
+            if preferred in _generators:
+                _active_model = preferred
+                break
     _schedule_cleanup()
 
 
@@ -308,8 +462,10 @@ def switch_image_model(name: str) -> str:
     name = name.lower().strip()
     if name in ("mm", "minimax"):
         name = "minimax"
-    elif name in ("gpt", "gpt-image", "gptimage"):
-        name = "gpt"
+    elif name in ("gpt", "gpt2", "gpt-image-2", "grs", "grsai"):
+        name = "gpt2"
+    elif name in ("gpt1", "gpt-image", "gptimage", "oldgpt"):
+        name = "gpt1"
     if name not in _generators:
         available = ", ".join(_generators.keys()) or "(无)"
         return f"图片模型 {name} 不可用，可用: {available}，当前: {_active_model}"

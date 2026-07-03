@@ -8,7 +8,7 @@ import httpx
 from nonebot import logger
 
 from .utils import download_async
-from .image_generator import _save_b64_image, _save_data_uri
+from .image_generator import GRSAIImageGenerator, _save_b64_image, _save_data_uri
 
 IMAGE_DIR = Path(__file__).parent.parent / "data" / "edited_images"
 
@@ -18,32 +18,72 @@ class ImageEditor:
 
     def __init__(self, gpt_api_key: str = "", gpt_base_url: str = "http://freeapi.dgbmc.top",
                  gpt_model: str = "gpt-image-2",
+                 gpt2_api_key: str = "", gpt2_base_url: str = "https://grsai.dakka.com.cn",
+                 gpt2_model: str = "gpt-image-2", gpt2_quality: str = "auto",
                  minimax_api_key: str = "", minimax_base_url: str = "https://api.minimaxi.com/v1",
                  minimax_model: str = "image-01"):
         self.gpt_api_key = gpt_api_key
         self.gpt_base_url = gpt_base_url.rstrip("/")
         self.gpt_model = gpt_model
+        self.gpt2_generator = (
+            GRSAIImageGenerator(
+                api_key=gpt2_api_key,
+                base_url=gpt2_base_url,
+                model=gpt2_model,
+                quality=gpt2_quality,
+                image_dir=IMAGE_DIR,
+            )
+            if gpt2_api_key
+            else None
+        )
         self.minimax_api_key = minimax_api_key
         self.minimax_base_url = minimax_base_url.rstrip("/")
         self.minimax_model = minimax_model
         self.image_dir = IMAGE_DIR
         self.image_dir.mkdir(parents=True, exist_ok=True)
 
-    async def edit(self, image_path: str, prompt: str, model: str = "minimax",
+    async def edit(self, image_path: str, prompt: str, model: str = "gpt2",
                    n: int = 1, aspect_ratio: str = "1:1") -> list[str]:
-        if model == "gpt" and self.gpt_api_key:
+        model = (model or "gpt2").lower().strip()
+        if model == "gpt":
+            model = "gpt2" if self.gpt2_generator else "gpt1"
+        if model == "gpt2" and self.gpt2_generator:
+            return await self._edit_gpt2(image_path, prompt, n, aspect_ratio)
+        if model == "gpt1" and self.gpt_api_key:
             return await self._edit_gpt(image_path, prompt, n, aspect_ratio)
-        elif self.minimax_api_key:
+        if model == "minimax" and self.minimax_api_key:
             try:
                 return await self._edit_minimax(image_path, prompt, n, aspect_ratio)
             except RuntimeError as e:
                 # 内容审核拒绝时自动 fallback 到 GPT
-                if "sensitive" in str(e).lower() and self.gpt_api_key:
-                    logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT: {e}")
-                    return await self._edit_gpt(image_path, prompt, n, aspect_ratio)
+                if "sensitive" in str(e).lower():
+                    if self.gpt2_generator:
+                        logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT2: {e}")
+                        return await self._edit_gpt2(image_path, prompt, n, aspect_ratio)
+                    if self.gpt_api_key:
+                        logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT1: {e}")
+                        return await self._edit_gpt(image_path, prompt, n, aspect_ratio)
                 raise
-        else:
-            raise RuntimeError("没有可用的图生图后端")
+        available = []
+        if self.gpt2_generator:
+            available.append("gpt2")
+        if self.gpt_api_key:
+            available.append("gpt1")
+        if self.minimax_api_key:
+            available.append("minimax")
+        raise RuntimeError(f"图生图模型 {model} 不可用，可用: {', '.join(available) or '(无)'}")
+
+    async def _edit_gpt2(self, image_path: str, prompt: str, n: int = 1,
+                         aspect_ratio: str = "1:1") -> list[str]:
+        if not self.gpt2_generator:
+            raise RuntimeError("GPT2 图生图后端未配置 API Key")
+        image_uri = _encode_image_data_uri(image_path)
+        return await self.gpt2_generator.generate_from_urls(
+            prompt=prompt,
+            urls=[image_uri],
+            n=n,
+            aspect_ratio=aspect_ratio,
+        )
 
     async def _edit_gpt(self, image_path: str, prompt: str, n: int = 1,
                         aspect_ratio: str = "1:1") -> list[str]:
@@ -149,19 +189,28 @@ def _encode_image_b64(image_path: str) -> str:
 
 
 _editor: ImageEditor | None = None
-_active_editor_model: str = "gpt"
+_active_editor_model: str = "gpt2"
 
 
 def init_image_editor(gpt_api_key: str = "", gpt_base_url: str = "http://freeapi.dgbmc.top",
                       gpt_model: str = "gpt-image-2",
+                      gpt2_api_key: str = "", gpt2_base_url: str = "https://grsai.dakka.com.cn",
+                      gpt2_model: str = "gpt-image-2", gpt2_quality: str = "auto",
                       minimax_api_key: str = "", minimax_base_url: str = "https://api.minimaxi.com/v1",
                       minimax_model: str = "image-01") -> None:
-    global _editor
+    global _editor, _active_editor_model
     _editor = ImageEditor(
         gpt_api_key=gpt_api_key, gpt_base_url=gpt_base_url, gpt_model=gpt_model,
+        gpt2_api_key=gpt2_api_key, gpt2_base_url=gpt2_base_url,
+        gpt2_model=gpt2_model, gpt2_quality=gpt2_quality,
         minimax_api_key=minimax_api_key, minimax_base_url=minimax_base_url,
         minimax_model=minimax_model,
     )
+    if _active_editor_model == "gpt2" and not _editor.gpt2_generator:
+        if _editor.gpt_api_key:
+            _active_editor_model = "gpt1"
+        elif _editor.minimax_api_key:
+            _active_editor_model = "minimax"
     logger.info("[IMAGE EDITOR] 图生图编辑器已就绪")
 
 
@@ -178,14 +227,18 @@ def switch_editor_model(name: str) -> str:
     name = name.lower().strip()
     if name in ("mm", "minimax"):
         name = "minimax"
-    elif name in ("gpt", "gpt-image", "gptimage"):
-        name = "gpt"
+    elif name in ("gpt", "gpt2", "gpt-image-2", "grs", "grsai"):
+        name = "gpt2"
+    elif name in ("gpt1", "gpt-image", "gptimage", "oldgpt"):
+        name = "gpt1"
     else:
-        return f"图生图模型名 {name} 不认识，可用: minimax, gpt"
+        return f"图生图模型名 {name} 不认识，可用: gpt2, gpt1, minimax"
     if _editor is None:
         return "图生图编辑器未初始化"
-    if name == "gpt" and not _editor.gpt_api_key:
-        return "GPT 图生图后端未配置 API Key"
+    if name == "gpt2" and not _editor.gpt2_generator:
+        return "GPT2 图生图后端未配置 API Key"
+    if name == "gpt1" and not _editor.gpt_api_key:
+        return "GPT1 图生图后端未配置 API Key"
     if name == "minimax" and not _editor.minimax_api_key:
         return "MiniMax 图生图后端未配置 API Key"
     _active_editor_model = name
