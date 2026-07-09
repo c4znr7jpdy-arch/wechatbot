@@ -1,0 +1,38 @@
+{
+  "accounts": [
+    {
+      "auto_pause_on_expired": true,
+      "concurrency": 10,
+      "credentials": {
+        "access_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImFlNjc5NWRjLTRiYWUtNDE4YS04NjVkLTA4YTY0MzllZWRhNiIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS92MSJdLCJjbGllbnRfaWQiOiJhcHBfWDh6WTZ2VzJwUTl0UjNkRTduSzFqTDVnSCIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJhbXIiOlsib3RwIiwidXJuOm9wZW5haTphbXI6b3RwX2VtYWlsIl0sImNoYXRncHRfYWNjb3VudF9pZCI6ImFlNjdhYTA5LWYzZDMtNDg5NS05NzdkLTljYTQ0ZWQxZDk5NiIsImNoYXRncHRfYWNjb3VudF91c2VyX2lkIjoidXNlci1XdU91WFl6ajZKRk02bWhOekw3UHg4NjVfX2FlNjdhYTA5LWYzZDMtNDg5NS05NzdkLTljYTQ0ZWQxZDk5NiIsImNoYXRncHRfY29tcHV0ZV9yZXNpZGVuY3kiOiJub19jb25zdHJhaW50IiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJrMTIiLCJjaGF0Z3B0X3VzZXJfaWQiOiJ1c2VyLVd1T3VYWXpqNkpGTTZtaE56TDdQeDg2NSIsInVzZXJfaWQiOiJ1c2VyLVd1T3VYWXpqNkpGTTZtaE56TDdQeDg2NSJ9LCJodHRwczovL2FwaS5vcGVuYWkuY29tL3Byb2ZpbGUiOnsiZW1haWwiOiIxOTgzcHJhYmh1dEBnbWFpbC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZX0sImlzcyI6Imh0dHBzOi8vYXV0aC5vcGVuYWkuY29tIiwicHdkX2F1dGhfdGltZSI6MTc4MzMxNjU0NzQzOCwic2NwIjpbIm9wZW5pZCIsImVtYWlsIiwicHJvZmlsZSIsIm9mZmxpbmVfYWNjZXNzIiwibW9kZWwucmVxdWVzdCIsIm1vZGVsLnJlYWQiLCJvcmdhbml6YXRpb24ucmVhZCIsIm9yZ2FuaXphdGlvbi53cml0ZSJdLCJzZXNzaW9uX2lkIjoiYXV0aHNlc3NfaTM0R3FxZjVRQzFHa0hLbWxYWFBDWWd0Iiwic2wiOnRydWUsInN1YiI6ImF1dGgwfHU4aXpIU1Q1VjZVUnVJU052TmRvTDk5cCIsImlhdCI6MTc4MzMxOTcxNCwiZXhwIjoxNzg0MTgzNzE0LCJqdGkiOiIwYjJiODA4YjEyZGM0YjRmYjE1OTgxNDExNjkyZmQxMiIsIm5iZiI6MTc4MzMxOTcxNH0.RwNEo7exTjVlnZ25Ioaorn_7d1bXZ_DVaXLwptvKeP6yeWdtjxE_dGgTVvAEO3mzS8gPVhN9Hqcv6q3mcegIF4Cux3BE8P_KSg_70hFMRNPVqqGzahpZtPOcaEkCGj0v6RbpHFSEnwaSBH4HbfIKx7b_XT1nRwYt3dIC9FucCpYIdKyyY9A9VN5kTMqLHsA-lFqC7DwTyZEaqI-Dl6lvfXbveDqxOPn9e0Tb0ij6bbmn6PnNvE52Ukjq-eodO3ZRq4XlOH-ql-3avelq__Ib3You6ZQDLGa19ZDI7c7w2l6jjUUPzgNO57JqeZlUQ88IS1rO7RbfK-k4e8TjD9eSAlPxXL95L3kdnCXs_ShwikMHUNhYDByg2nhReRm7d2Keq5Azfvz59mBGUrmyMisGydhzYipNJWwsj5PPBnlyu_qzg0wC4uxuuIm9wnLquOroDPLWUBtSpriO6jRN3M02aBzZaVgIZB-jvoFO1im2mh19VyWBhAomugLQCkBI71drT3neNNxxWderJsEc_a0KZnQREtuXPHJYCWIcbuNFUcVj-gt_7wiSXVVlrrUZ3e6o-CwgVArQ9m-YWf2r2phb0lgIYySQKWbDo5teKLPIYAj0wOq065KVJly_obJKS2qOm8MD3e8N9rPpU3spLNQJzORSL_BWGTlkn7BCK8r_NyU",
+        "chatgpt_account_id": "",
+        "chatgpt_user_id": "",
+        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+        "email": "1983prabhut@gmail.com",
+        "expires_at": 1791095722,
+        "expires_in": 7682126,
+        "id_token": "",
+        "organization_id": "",
+        "plan_type": "",
+        "refresh_token": ""
+      },
+      "extra": {
+        "email": "1983prabhut@gmail.com",
+        "last_refresh": "2026-07-07T08:39:56Z",
+        "openai_oauth_responses_websockets_v2_enabled": true,
+        "openai_oauth_responses_websockets_v2_mode": "ctx_pool",
+        "privacy_mode": "training_off"
+      },
+      "name": "1983prabhut",
+      "platform": "openai",
+      "priority": 1,
+      "rate_multiplier": 1,
+      "type": "oauth"
+    }
+  ],
+  "exported_at": "2026-07-07T08:39:56Z",
+  "format": "sub2api",
+  "proxies": [],
+  "token_kind": "workspace",
+  "workspace_id": ""
+}

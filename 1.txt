@@ -1,0 +1,597 @@
+// ==UserScript==
+// @name         ChatGPT K12 Invite Helper
+// @namespace    http://tampermonkey.net/
+// @version      0.2.0
+// @license      AGPLv3
+// @description  Visual helper for requesting and switching to a ChatGPT K12 workspace account
+// @match        https://chatgpt.com/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const PANEL_ID = 'chatgpt-k12-helper-panel';
+  const BODY_ID = 'chatgpt-k12-helper-body';
+  const STATUS_ID = 'chatgpt-k12-helper-status';
+  const RESULT_ID = 'chatgpt-k12-helper-result';
+  const ACCOUNT_INPUT_ID = 'chatgpt-k12-helper-account-input';
+  const RUN_BUTTON_ID = 'chatgpt-k12-helper-run';
+  const LEAVE_BUTTON_ID = 'chatgpt-k12-helper-leave';
+  const COPY_BUTTON_ID = 'chatgpt-k12-helper-copy';
+  const CLEAR_BUTTON_ID = 'chatgpt-k12-helper-clear';
+  const TOGGLE_BUTTON_ID = 'chatgpt-k12-helper-toggle';
+  const STORAGE_KEY = 'chatgpt-k12-helper-account-id';
+  const DEFAULT_ACCOUNT_ID = '';
+
+  let isRunning = false;
+  let lastResultText = '';
+
+  function formatResult(value) {
+    if (typeof value === 'string') {
+      return value;
+    }
+
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch (error) {
+      return String(value);
+    }
+  }
+
+  function setStatus(type, text) {
+    const statusEl = document.getElementById(STATUS_ID);
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = text;
+    statusEl.setAttribute('data-state', type);
+  }
+
+  function setResult(value) {
+    lastResultText = formatResult(value);
+
+    const resultEl = document.getElementById(RESULT_ID);
+    if (!resultEl) {
+      return;
+    }
+
+    resultEl.textContent = lastResultText || '暂无输出。';
+  }
+
+  function setRunningState(running) {
+    isRunning = running;
+
+    const runButton = document.getElementById(RUN_BUTTON_ID);
+    const leaveButton = document.getElementById(LEAVE_BUTTON_ID);
+    const copyButton = document.getElementById(COPY_BUTTON_ID);
+    const input = document.getElementById(ACCOUNT_INPUT_ID);
+
+    if (runButton) {
+      runButton.disabled = running;
+      runButton.textContent = running ? '执行中...' : '一键执行';
+    }
+
+    if (leaveButton) {
+      leaveButton.disabled = running;
+      leaveButton.textContent = running ? '执行中...' : '退出空间';
+    }
+
+    if (copyButton) {
+      copyButton.disabled = running || !lastResultText;
+    }
+
+    if (input) {
+      input.disabled = running;
+    }
+  }
+
+  function extractAccountId(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/(?:accounts\/)?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:\/invites)?/i);
+    return match ? match[1].toLowerCase() : '';
+  }
+
+  function getAccountInputValue() {
+    const input = document.getElementById(ACCOUNT_INPUT_ID);
+    return input ? input.value : '';
+  }
+
+  function saveAccountInputValue(value) {
+    try {
+      localStorage.setItem(STORAGE_KEY, value);
+    } catch (error) {
+      console.warn('保存 Account ID 失败：', error);
+    }
+  }
+
+  function getSavedAccountInputValue() {
+    try {
+      return localStorage.getItem(STORAGE_KEY) || '';
+    } catch (error) {
+      return '';
+    }
+  }
+
+  async function safeReadResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+      return response.json();
+    }
+
+    return response.text();
+  }
+
+  function formatCstDate(value) {
+    const date = value ? new Date(value) : new Date();
+    const cstDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+    const pad = (number) => String(number).padStart(2, '0');
+
+    return `${cstDate.getUTCFullYear()}-${pad(cstDate.getUTCMonth() + 1)}-${pad(cstDate.getUTCDate())} ${pad(cstDate.getUTCHours())}:${pad(cstDate.getUTCMinutes())}:${pad(cstDate.getUTCSeconds())} +0800`;
+  }
+
+  function buildCodexJson(accountId, accessToken, sessionData) {
+    return {
+      type: 'codex',
+      email: sessionData?.user?.email || '',
+      expired: formatCstDate(sessionData?.expires),
+      id_token: accessToken,
+      account_id: accountId,
+      disabled: false,
+      access_token: accessToken,
+      session_token: sessionData?.sessionToken || '',
+      last_refresh: formatCstDate(),
+      refresh_token: '',
+    };
+  }
+
+  function setChatGptAccountCookie(accountId) {
+    const encoded = encodeURIComponent(accountId);
+    document.cookie = `_account=${encoded}; path=/; domain=.chatgpt.com; SameSite=Lax; Secure`;
+    document.cookie = `_account=${encoded}; path=/; SameSite=Lax; Secure`;
+  }
+
+  async function runFlow() {
+    if (isRunning) {
+      return;
+    }
+
+    const rawAccountValue = getAccountInputValue();
+    const accountId = extractAccountId(rawAccountValue) || DEFAULT_ACCOUNT_ID;
+
+    if (rawAccountValue.trim()) {
+      saveAccountInputValue(rawAccountValue.trim());
+    }
+    setRunningState(true);
+    setStatus('running', '正在获取 ChatGPT session...');
+    setResult('');
+
+    try {
+      const sessionRes = await fetch('https://chatgpt.com/api/auth/session', {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          accept: 'application/json',
+        },
+      });
+      const sessionData = await safeReadResponse(sessionRes);
+
+      if (!sessionRes.ok) {
+        throw new Error(`获取 session 失败: ${sessionRes.status} ${sessionRes.statusText}\n${formatResult(sessionData)}`);
+      }
+
+      const accessToken = sessionData?.accessToken;
+      if (!accessToken) {
+        throw new Error('未能获取到 accessToken，请确认当前浏览器已登录 chatgpt.com。');
+      }
+
+      setStatus('running', '正在发送 K12 invite request...');
+
+      const inviteUrl = `https://chatgpt.com/backend-api/accounts/${accountId}/invites/request`;
+      const inviteRes = await fetch(inviteUrl, {
+        method: 'POST',
+        credentials: 'include',
+        mode: 'cors',
+        referrer: 'https://chatgpt.com/k12-verification',
+        referrerPolicy: 'strict-origin-when-cross-origin',
+        headers: {
+          accept: '*/*',
+          'accept-language': 'en-US,en;q=0.9',
+          authorization: `Bearer ${accessToken}`,
+          'cache-control': 'no-cache',
+          'oai-language': 'en-US',
+          pragma: 'no-cache',
+        },
+        body: null,
+      });
+      const inviteResult = await safeReadResponse(inviteRes);
+
+      if (!inviteRes.ok) {
+        throw new Error(`邀请请求失败: ${inviteRes.status} ${inviteRes.statusText}\n${formatResult(inviteResult)}`);
+      }
+
+      setStatus('running', '邀请请求成功，正在尝试切换 workspace...');
+      setChatGptAccountCookie(accountId);
+
+      const switchedSessionRes = await fetch('https://chatgpt.com/api/auth/session', {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          accept: 'application/json',
+        },
+      });
+      const switchedSessionData = await safeReadResponse(switchedSessionRes);
+
+      const outputSessionData = switchedSessionData?.accessToken ? switchedSessionData : sessionData;
+      const outputAccessToken = outputSessionData?.accessToken || accessToken;
+      const codexJson = buildCodexJson(accountId, outputAccessToken, outputSessionData);
+      const switched = switchedSessionData?.account?.id === accountId;
+
+      setResult(codexJson);
+      setStatus('success', switched ? '执行完成，已输出 Codex JSON' : '已输出 Codex JSON，但 session 未确认切换');
+      console.log('ChatGPT K12 Helper Codex JSON：', codexJson);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus('error', '执行失败');
+      setResult({ success: false, error: message });
+      console.error('ChatGPT K12 Helper 执行失败：', error);
+    } finally {
+      setRunningState(false);
+    }
+  }
+
+  async function leaveWorkspace() {
+    if (isRunning) {
+      return;
+    }
+
+    const confirmed = window.confirm('确定要退出当前空间吗？此操作会将当前用户从当前 workspace 移除。');
+    if (!confirmed) {
+      setStatus('idle', '已取消退出空间');
+      return;
+    }
+
+    setRunningState(true);
+    setStatus('running', '正在获取当前 session...');
+    setResult('');
+
+    try {
+      const sessionRes = await fetch('https://chatgpt.com/api/auth/session', {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          accept: 'application/json',
+        },
+      });
+      const sessionData = await safeReadResponse(sessionRes);
+
+      if (!sessionRes.ok) {
+        throw new Error(`获取 session 失败: ${sessionRes.status} ${sessionRes.statusText}\n${formatResult(sessionData)}`);
+      }
+
+      const accessToken = sessionData?.accessToken;
+      const accountId = sessionData?.account?.id;
+      const userId = sessionData?.user?.id;
+
+      if (!accessToken) {
+        throw new Error('未能获取到 accessToken，请确认当前浏览器已登录 chatgpt.com。');
+      }
+
+      if (!accountId || !userId) {
+        throw new Error('未能获取到当前 account ID 或 user ID，请确认当前位于需要退出的 workspace。');
+      }
+
+      setStatus('running', '正在退出当前 workspace...');
+
+      const leaveRes = await fetch(`https://chatgpt.com/backend-api/accounts/${accountId}/users/${userId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
+        },
+      });
+      const leaveResult = await safeReadResponse(leaveRes);
+
+      if (!leaveRes.ok) {
+        throw new Error(`退出空间请求失败: ${leaveRes.status} ${leaveRes.statusText}\n${formatResult(leaveResult)}`);
+      }
+
+      const success = leaveResult?.success || false;
+      setResult({
+        success,
+        account_id: accountId,
+        user_id: userId,
+        response: leaveResult,
+      });
+      setStatus(success ? 'success' : 'error', success ? '退出成功' : '退出失败，请重试');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus('error', '退出失败，请重试');
+      setResult({ success: false, error: message });
+      console.error('ChatGPT K12 Helper 退出空间失败：', error);
+    } finally {
+      setRunningState(false);
+    }
+  }
+
+  async function copyText(text, emptyMessage, successMessage) {
+    if (!text) {
+      setStatus('idle', emptyMessage);
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus('success', successMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus('error', '复制失败');
+      console.error('复制失败：', message);
+    }
+  }
+
+  function copyResult() {
+    return copyText(lastResultText, '暂无可复制结果', '结果已复制到剪贴板');
+  }
+
+  function clearResult() {
+    lastResultText = '';
+    setResult('');
+    setStatus('idle', '已清空结果');
+    setRunningState(false);
+  }
+
+  function togglePanelBody() {
+    const bodyEl = document.getElementById(BODY_ID);
+    const toggleButton = document.getElementById(TOGGLE_BUTTON_ID);
+    if (!bodyEl || !toggleButton) {
+      return;
+    }
+
+    const isHidden = bodyEl.hidden;
+    bodyEl.hidden = !isHidden;
+    toggleButton.textContent = isHidden ? '收起' : '展开';
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      #${PANEL_ID} {
+        position: fixed;
+        top: 50%;
+        right: 20px;
+        transform: translateY(-50%);
+        z-index: 999999;
+        width: 440px;
+        color: #e5e7eb;
+        background: rgba(15, 23, 42, 0.96);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 16px;
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(12px);
+        font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+
+      #${PANEL_ID} * {
+        box-sizing: border-box;
+      }
+
+      #${PANEL_ID} button,
+      #${PANEL_ID} input {
+        font-family: inherit;
+      }
+
+      #${PANEL_ID} button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+      }
+
+      #${PANEL_ID} button:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+
+      #${PANEL_ID} button:disabled,
+      #${PANEL_ID} input:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      #${PANEL_ID} .helper-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      #${PANEL_ID} .helper-title {
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .helper-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #cbd5e1;
+        margin-top: 6px;
+      }
+
+      #${PANEL_ID} .helper-status::before {
+        content: '';
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #94a3b8;
+      }
+
+      #${STATUS_ID}[data-state="idle"]::before {
+        background: #94a3b8;
+      }
+
+      #${STATUS_ID}[data-state="running"]::before {
+        background: #f59e0b;
+      }
+
+      #${STATUS_ID}[data-state="success"]::before {
+        background: #22c55e;
+      }
+
+      #${STATUS_ID}[data-state="error"]::before {
+        background: #ef4444;
+      }
+
+      #${BODY_ID} {
+        padding: 16px;
+      }
+
+      #${PANEL_ID} .helper-field {
+        margin-bottom: 14px;
+      }
+
+      #${PANEL_ID} .helper-label {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 12px;
+        color: #cbd5e1;
+        font-weight: 600;
+      }
+
+      #${ACCOUNT_INPUT_ID} {
+        width: 100%;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 10px;
+        outline: none;
+        padding: 10px 12px;
+        color: #e5e7eb;
+        background: rgba(2, 6, 23, 0.72);
+        font-size: 13px;
+      }
+
+      #${ACCOUNT_INPUT_ID}:focus {
+        border-color: rgba(96, 165, 250, 0.75);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+      }
+
+      #${PANEL_ID} .helper-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      #${RUN_BUTTON_ID} {
+        background: linear-gradient(135deg, #2563eb, #3b82f6);
+        color: #fff;
+      }
+
+      #${LEAVE_BUTTON_ID} {
+        background: rgba(239, 68, 68, 0.16);
+        color: #fecaca;
+      }
+
+      #${COPY_BUTTON_ID} {
+        background: rgba(59, 130, 246, 0.14);
+        color: #bfdbfe;
+      }
+
+      #${CLEAR_BUTTON_ID},
+      #${TOGGLE_BUTTON_ID} {
+        background: rgba(148, 163, 184, 0.14);
+        color: #e2e8f0;
+      }
+
+      #${TOGGLE_BUTTON_ID} {
+        padding: 8px 12px;
+      }
+
+      #${RESULT_ID} {
+        min-height: 260px;
+        max-height: 440px;
+        overflow: auto;
+        margin: 0;
+        padding: 14px;
+        border-radius: 12px;
+        background: rgba(2, 6, 23, 0.75);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        color: #dbeafe;
+        font-size: 12px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      #${PANEL_ID} .helper-tip {
+        margin-top: 10px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #94a3b8;
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) {
+      return;
+    }
+
+    createStyles();
+
+    const savedAccountValue = getSavedAccountInputValue();
+    const panel = document.createElement('section');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="helper-header">
+        <div>
+          <div class="helper-title">ChatGPT K12 Invite Helper</div>
+          <div id="${STATUS_ID}" class="helper-status" data-state="idle">等待输入 account ID</div>
+        </div>
+        <button id="${TOGGLE_BUTTON_ID}" type="button">收起</button>
+      </div>
+      <div id="${BODY_ID}">
+        <div class="helper-field">
+          <label class="helper-label" for="${ACCOUNT_INPUT_ID}">Account / Workspace ID 或邀请链接</label>
+          <input id="${ACCOUNT_INPUT_ID}" type="text" value="${savedAccountValue.replace(/"/g, '&quot;')}" placeholder="请输入..." autocomplete="off">
+        </div>
+        <div class="helper-actions">
+          <button id="${RUN_BUTTON_ID}" type="button">一键执行</button>
+          <button id="${LEAVE_BUTTON_ID}" type="button">退出空间</button>
+          <button id="${COPY_BUTTON_ID}" type="button" disabled>复制 Codex JSON</button>
+          <button id="${CLEAR_BUTTON_ID}" type="button">清空</button>
+        </div>
+        <pre id="${RESULT_ID}">默认使用 ${DEFAULT_ACCOUNT_ID}。输入 accounts/{id} 中的 id 后会优先使用输入值。</pre>
+        <div class="helper-tip">脚本仅在 https://chatgpt.com/ 域名下生效；accessToken 只在当前页面内用于请求，不会上传到第三方。</div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+
+    document.getElementById(RUN_BUTTON_ID)?.addEventListener('click', runFlow);
+    document.getElementById(LEAVE_BUTTON_ID)?.addEventListener('click', leaveWorkspace);
+    document.getElementById(COPY_BUTTON_ID)?.addEventListener('click', copyResult);
+    document.getElementById(CLEAR_BUTTON_ID)?.addEventListener('click', clearResult);
+    document.getElementById(TOGGLE_BUTTON_ID)?.addEventListener('click', togglePanelBody);
+  }
+
+  function init() {
+    createPanel();
+  }
+
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();

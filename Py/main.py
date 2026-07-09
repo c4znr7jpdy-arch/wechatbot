@@ -81,6 +81,7 @@ class AstrBotWsClient:
         self._sent_msg_queues = {}  # to_wxid -> [msg_info, ...]
         self._last_send_to_wxid = ""
         self._last_send_type = ""  # 最近一次发送的消息类型（text/image 等），用于 11047 兜底
+        self._image_recall_fifo = []  # bot 图片发送 FIFO，等待 11047 绑定 newMsgId，供精准撤回
         self._connecting = False
         self._receive_task = None
         self._reconnect_task = None
@@ -112,12 +113,12 @@ class AstrBotWsClient:
     def _peek_recall_msg(self, to_wxid: str, msg_type: str = ""):
         queue = self._sent_msg_queues.get(to_wxid) or []
         if msg_type:
-            for item in queue:
+            for item in reversed(queue):
                 if isinstance(item, dict) and item.get("type") == msg_type:
                     return item
             return None
         if queue:
-            return queue[0]
+            return queue[-1]
         return self._last_sent_msg.get(to_wxid)
 
     def _mark_recall_done(self, to_wxid: str, msg_info):
@@ -202,6 +203,7 @@ class AstrBotWsClient:
                             "X-Client-Role": "Universal",
                         },
                         ping_interval=None,
+                        max_size=None,  # Remove default 1MiB limit; base64 image reports can exceed it
                     )
                     logger.info("AstrBot WebSocket 连接成功")
 
@@ -2260,36 +2262,69 @@ class WeChatServiceHandler:
         # 处理 11047 发送响应（捕获 newMsgId 用于消息撤回）
         if message_type == 11047:
             logger.info(f"[SEND RESP 11047] data={json.dumps(data, ensure_ascii=False)[:500]}")
+            # 11047 是微信“消息事件推送”，群友发的消息也会触发（is_pc=0）。
+            # 只处理 bot 自己发出的（is_pc=1），否则别人消息的 msgid 会混进撤回队列导致撤错。
+            is_pc = data.get("is_pc", 0)
+            if is_pc != 1:
+                return
             astrbot_ws = get_astrbot_ws_client()
+            if not astrbot_ws:
+                return
             trace_id = ""
             if isinstance(dict_data, dict):
                 trace_id = dict_data.get("trace", "") or data.get("trace", "")
             new_msg_id = data.get("newMsgId") or data.get("msgid") or data.get("msg_id") or data.get("MsgSvrID") or data.get("msgSvrId")
             client_msgid = data.get("client_msgid", 0)
             create_time = data.get("create_time", 0)
-            if new_msg_id and astrbot_ws:
-                if trace_id and trace_id in astrbot_ws._pending_send:
-                    pending_info = astrbot_ws._pending_send.pop(trace_id)
-                    to_wxid = pending_info.get("to_wxid", "")
+            raw_msg = data.get("raw_msg", "") or ""
+            is_image = "<img" in raw_msg
+            if not new_msg_id:
+                return
+            # 图片发送：优先按 trace 绑定；没有 trace 时只在唯一候选下兜底，避免撤错图。
+            if is_image and astrbot_ws._image_recall_fifo:
+                now_ts = time.time()
+                candidates = [
+                    entry for entry in astrbot_ws._image_recall_fifo
+                    if not entry.get("msgid") and now_ts - entry.get("ts", 0) <= 90
+                ]
+                entry = None
+                if trace_id:
+                    for candidate in candidates:
+                        if candidate.get("trace") == trace_id:
+                            entry = candidate
+                            break
+                elif len(candidates) == 1:
+                    entry = candidates[0]
+                if entry:
+                    entry["msgid"] = str(new_msg_id)
+                    entry["client_msgid"] = client_msgid
+                    entry["create_time"] = create_time
+                    logger.info(f"[SEND RESP] image bound: trace={entry.get('trace')}, to={entry.get('to_wxid')}, newMsgId={new_msg_id}")
+                elif candidates:
+                    logger.warning(f"[SEND RESP] image bind skipped: trace={trace_id}, candidates={len(candidates)}, newMsgId={new_msg_id}")
+            # 兼容 recall_last_msg 等 API：仍写入共享队列（仅 bot 自身发送）
+            if trace_id and trace_id in astrbot_ws._pending_send:
+                pending_info = astrbot_ws._pending_send.pop(trace_id)
+                to_wxid = pending_info.get("to_wxid", "")
+                astrbot_ws._remember_sent_msg(to_wxid, {
+                    "new_msgid": str(new_msg_id),
+                    "client_msgid": client_msgid,
+                    "create_time": create_time,
+                    "type": pending_info.get("type", ""),
+                    "trace": trace_id,
+                })
+                logger.info(f"[SEND RESP] trace={trace_id}, to={to_wxid}, newMsgId={new_msg_id}")
+            else:
+                to_wxid = getattr(astrbot_ws, "_last_send_to_wxid", "")
+                if to_wxid:
                     astrbot_ws._remember_sent_msg(to_wxid, {
                         "new_msgid": str(new_msg_id),
                         "client_msgid": client_msgid,
                         "create_time": create_time,
-                        "type": pending_info.get("type", ""),
-                        "trace": trace_id,
+                        "type": getattr(astrbot_ws, "_last_send_type", ""),
+                        "trace": "",
                     })
-                    logger.info(f"[SEND RESP] trace={trace_id}, to={to_wxid}, newMsgId={new_msg_id}")
-                else:
-                    to_wxid = getattr(astrbot_ws, "_last_send_to_wxid", "")
-                    if to_wxid:
-                        astrbot_ws._remember_sent_msg(to_wxid, {
-                            "new_msgid": str(new_msg_id),
-                            "client_msgid": client_msgid,
-                            "create_time": create_time,
-                            "type": getattr(astrbot_ws, "_last_send_type", ""),
-                            "trace": "",
-                        })
-                        logger.info(f"[SEND RESP] to={to_wxid}, newMsgId={new_msg_id}, type={getattr(astrbot_ws, '_last_send_type', '')}")
+                    logger.info(f"[SEND RESP] to={to_wxid}, newMsgId={new_msg_id}, type={getattr(astrbot_ws, '_last_send_type', '')}")
 
     def _parse_11061_xml(self, raw_msg: str) -> dict:
         """解析 11061 的 raw_msg XML，提取用户文本和引用消息信息"""
@@ -3411,15 +3446,25 @@ class WeChatService:
             trace = str(_uuid.uuid4())
         payload["trace"] = trace
         astrbot_ws = get_astrbot_ws_client()
+        recall_entry = None
         if astrbot_ws:
             astrbot_ws._pending_send[trace] = {"to_wxid": to_wxid, "type": "image"}
             astrbot_ws._last_send_to_wxid = to_wxid
             astrbot_ws._last_send_type = "image"
+            if auto_recall_delay > 0:
+                # 只登记需要自动撤回的图片，避免普通图片污染撤回 FIFO。
+                fifo = astrbot_ws._image_recall_fifo
+                recall_entry = {"trace": trace, "to_wxid": to_wxid, "msgid": "", "ts": time.time(), "recall_delay": auto_recall_delay}
+                fifo.append(recall_entry)
+                if len(fifo) > 100:
+                    del fifo[:len(fifo) - 100]
         message = json.dumps(payload, ensure_ascii=False)
         logger.info(f"图片消息发送: {file_path} -> {to_wxid}")
         if to_wxid == "filehelper" and self.handler:
             self.handler._cache_filehelper_msg(sender=self.bot_nickname or "bot", content=f"[图片] {file_path}", direction="out")
         ok = self.send_message(message)
+        if not ok and recall_entry and astrbot_ws and recall_entry in astrbot_ws._image_recall_fifo:
+            astrbot_ws._image_recall_fifo.remove(recall_entry)
         if ok and auto_recall_delay > 0:
             self._schedule_auto_recall(to_wxid, trace, auto_recall_delay, "image")
         return ok
@@ -3433,40 +3478,36 @@ class WeChatService:
             _time.sleep(delay)
             astrbot_ws = get_astrbot_ws_client()
             for attempt in range(3):
-                # 从队列找到最新一条待撤回消息
-                msg_info = None
+                # 在图片撤回 FIFO 中精准匹配（11047 已把 newMsgId 绑回对应 trace）
+                entry = None
                 if astrbot_ws:
-                    # 优先按 trace 精确匹配
+                    fifo = astrbot_ws._image_recall_fifo
                     if trace:
-                        queue = astrbot_ws._sent_msg_queues.get(to_wxid) or []
-                        for item in queue:
-                            if isinstance(item, dict) and item.get("trace") == trace:
-                                msg_info = item
+                        for item in fifo:
+                            if item.get("trace") == trace:
+                                entry = item
                                 break
-                    # 兜底：按类型取队列里的待撤回消息，避免注册时 11047 还没回包。
-                    if not msg_info and msg_type:
-                        msg_info = astrbot_ws._peek_recall_msg(to_wxid, msg_type)
-                    # 兜底：未指定类型时取该会话最后一条消息。
-                    if not msg_info:
-                        last = astrbot_ws._last_sent_msg.get(to_wxid)
-                        if isinstance(last, dict) and (not msg_type or last.get("type") == msg_type):
-                            msg_info = last
-                if not msg_info or not isinstance(msg_info, dict):
+                    if not trace:
+                        for item in reversed(fifo):
+                            if item.get("to_wxid") == to_wxid and item.get("msgid"):
+                                entry = item
+                                break
+                if not entry or not isinstance(entry, dict):
                     logger.warning(f"[自动撤回] 未找到消息 trace={trace}, to={to_wxid}, type={msg_type}, attempt={attempt+1}")
                     _time.sleep(3)
                     continue
-                new_msgid = msg_info.get("new_msgid", "")
+                new_msgid = entry.get("msgid", "")
                 if not new_msgid:
-                    logger.warning(f"[自动撤回] 消息无 new_msgid trace={trace}, attempt={attempt+1}")
+                    logger.warning(f"[自动撤回] 消息尚未绑定 newMsgId trace={trace}, attempt={attempt+1}")
                     _time.sleep(3)
                     continue
                 ok = self.helper_recall_msg(to_wxid, new_msgid,
-                                            msg_info.get("client_msgid", 0),
-                                            msg_info.get("create_time", 0))
+                                            entry.get("client_msgid", 0),
+                                            entry.get("create_time", 0))
                 logger.info(f"[自动撤回] to={to_wxid}, attempt={attempt+1}, ok={ok}")
                 if ok:
-                    if astrbot_ws:
-                        astrbot_ws._mark_recall_done(to_wxid, msg_info)
+                    if astrbot_ws and entry in astrbot_ws._image_recall_fifo:
+                        astrbot_ws._image_recall_fifo.remove(entry)
                     return
                 _time.sleep(3)
             logger.error(f"[自动撤回] 3次重试均失败: to={to_wxid}, trace={trace}")

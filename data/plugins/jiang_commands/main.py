@@ -5,7 +5,6 @@
 import sys
 import os
 import re
-import asyncio
 import logging
 import tempfile
 import time
@@ -331,8 +330,7 @@ class Main(star.Star):
 
                 sent = await self._send_random_image_with_recall(event, tmp_path, 20)
                 if not sent:
-                    logger.info("[图来撤回] direct send failed; fallback to image_result + recall registration")
-                    asyncio.create_task(self._auto_recall(event, 20))
+                    logger.info("[图来撤回] direct send failed; fallback to image_result without auto recall")
                     yield event.image_result(tmp_path)
             elif resp is not None and resp.status_code == 404:
                 yield event.plain_result("图库空了，等会儿再来~")
@@ -342,28 +340,6 @@ class Main(star.Star):
         except Exception as e:
             logger.exception(f"图来失败: {e}")
             yield event.plain_result("获取图片失败，网络开小差了")
-
-    async def _auto_recall(self, event: AstrMessageEvent, delay: int):
-        """图片发送后立即注册定时撤回（由微信注入层后台执行，不依赖 event.bot 长期存活）"""
-        chat_id = event.get_group_id() or event.get_sender_id()
-        if not chat_id:
-            logger.warning("[图来撤回] chat_id 为空，放弃")
-            return
-        try:
-            result = await event.bot.call_action(
-                "auto_recall_last_msg",
-                group_id=chat_id,
-                user_id=chat_id,
-                to_wxid=chat_id,
-                msg_type="image",
-                delay=delay,
-            )
-            logger.info(f"[图来撤回] 已注册: chat={chat_id}, delay={delay}s, result={result}")
-        except Exception as e:
-            if type(e).__name__ == "ApiNotAvailable":
-                logger.debug("[图来撤回] OneBot API not ready; skip auto recall")
-                return
-            logger.warning(f"[图来撤回] 注册失败: {type(e).__name__}: {e}")
 
     async def _send_random_image_with_recall(
         self, event: AstrMessageEvent, image_path: str, delay: int
