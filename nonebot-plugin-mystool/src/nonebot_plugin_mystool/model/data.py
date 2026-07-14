@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from httpx import Cookies
 from nonebot.log import logger
-from pydantic import BaseModel, ValidationError, field_validator, Field, ConfigDict
+from pydantic.v1 import BaseModel, ValidationError, validator, Field
 
 from .._version import __version__
 from ..model.common import data_path, BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord
@@ -88,24 +88,24 @@ class BBSCookies(BaseModelWithSetter, BaseModelWithUpdate):
     >>> assert bbs_cookies.stuid == "456"
     >>> assert bbs_cookies.stoken == "abc"
     """
-    stuid: Optional[str] = None
+    stuid: Optional[str]
     """米游社UID"""
-    ltuid: Optional[str] = None
+    ltuid: Optional[str]
     """米游社UID"""
-    account_id: Optional[str] = None
+    account_id: Optional[str]
     """米游社UID"""
-    login_uid: Optional[str] = None
+    login_uid: Optional[str]
     """米游社UID"""
 
-    stoken_v1: Optional[str] = None
+    stoken_v1: Optional[str]
     """保存stoken_v1，方便后续使用"""
-    stoken_v2: Optional[str] = None
+    stoken_v2: Optional[str]
     """保存stoken_v2，方便后续使用"""
 
-    cookie_token: Optional[str] = None
-    login_ticket: Optional[str] = None
-    ltoken: Optional[str] = None
-    mid: Optional[str] = None
+    cookie_token: Optional[str]
+    login_ticket: Optional[str]
+    ltoken: Optional[str]
+    mid: Optional[str]
 
     def __init__(self, **data: Any):
         super().__init__(**data)
@@ -221,18 +221,18 @@ class UserAccount(BaseModelWithSetter):
     >>> user_account.bbs_uid = "123"
     >>> assert user_account.bbs_uid == "123"
     """
-    phone_number: Optional[str] = None
+    phone_number: Optional[str]
     """手机号"""
-    cookies: BBSCookies = BBSCookies()
+    cookies: BBSCookies
     """Cookies"""
-    address: Optional[Address] = None
+    address: Optional[Address]
     """收货地址"""
 
-    device_id_ios: str = ""
+    device_id_ios: str
     """iOS设备用 deviceID"""
-    device_id_android: str = ""
+    device_id_android: str
     """安卓设备用 deviceID"""
-    device_fp: Optional[str] = None
+    device_fp: Optional[str]
     """iOS设备用 deviceFp"""
     enable_mission: bool = True
     '''是否开启米游币任务计划'''
@@ -293,13 +293,13 @@ class ExchangePlan(BaseModel):
     兑换计划数据类
     """
 
-    good: Good = None
+    good: Good
     """商品"""
-    address: Optional[Address] = None
+    address: Optional[Address]
     """地址ID"""
-    account: UserAccount = None
+    account: UserAccount
     """米游社账号"""
-    game_record: Optional[GameRecord] = None
+    game_record: Optional[GameRecord]
     """商品对应的游戏的玩家账号"""
 
     def __hash__(self):
@@ -376,7 +376,7 @@ class UserData(BaseModelWithSetter):
     """
     enable_notice: bool = True
     """是否开启通知"""
-    geetest_url: Optional[str] = None
+    geetest_url: Optional[str]
     '''极验Geetest人机验证打码接口URL'''
     geetest_params: Optional[Dict[str, Any]] = None
     '''极验Geetest人机验证打码API发送的参数（除gt，challenge外）'''
@@ -391,7 +391,7 @@ class UserData(BaseModelWithSetter):
     accounts: Dict[str, UserAccount] = {}
     """储存一些已绑定的账号数据"""
 
-    @field_validator("uuid", mode="before")
+    @validator("uuid")
     def uuid_validator(cls, v):
         """
         验证UUID是否为合法的UUIDv4
@@ -400,7 +400,6 @@ class UserData(BaseModelWithSetter):
         """
         if v is None and not uuid4_validate(v):
             raise ValueError("UUID格式错误，不是合法的UUIDv4")
-        return v
 
     def __init__(self, **data: Any):
         global _new_uuid_in_init
@@ -464,7 +463,8 @@ class PluginData(BaseModel):
         super().__init__(**data)
         self.do_user_bind(write=True)
 
-    model_config = ConfigDict()
+    class Config:
+        json_encoders = UserAccount.Config.json_encoders
 
 
 class PluginDataManager:
@@ -492,7 +492,7 @@ class PluginDataManager:
         else:
             cls.plugin_data = PluginData()
             try:
-                str_data = cls.plugin_data.model_dump_json(indent=4)
+                str_data = cls.plugin_data.json(indent=4)
                 plugin_data_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(plugin_data_path, "w", encoding="utf-8") as f:
                     f.write(str_data)

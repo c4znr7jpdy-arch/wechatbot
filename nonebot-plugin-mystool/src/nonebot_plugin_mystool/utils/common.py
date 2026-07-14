@@ -32,7 +32,7 @@ from nonebot.adapters.onebot.v11 import MessageEvent as OneBotV11MessageEvent, P
     Adapter as OneBotV11Adapter, Bot as OneBotV11Bot
 from nonebot.adapters.qq import DirectMessageCreateEvent, MessageCreateEvent, \
     Adapter as QQGuildAdapter, Bot as QQGuildBot, MessageEvent
-from nonebot.adapters.onebot.v12 import MessageEvent as OneBotV12MessageEvent, PrivateMessageEvent as OneBotV12PrivateMessageEvent, GroupMessageEvent as OneBotV12GroupMessageEvent, Adapter as OneBotV12Adapter, Bot as OneBotV12Bot
+from nonebot.log import logger
 from nonebot.log import logger
 from qrcode import QRCode
 
@@ -48,11 +48,11 @@ __all__ = ["GeneralMessageEvent", "GeneralPrivateMessageEvent", "GeneralGroupMes
 # 启用 nonebot-plugin-send-anything-anywhere 的自动选择 Bot 功能
 enable_auto_select_bot()
 
-GeneralMessageEvent = OneBotV11MessageEvent, MessageCreateEvent, DirectMessageCreateEvent, MessageEvent, OneBotV12MessageEvent
+GeneralMessageEvent = OneBotV11MessageEvent, MessageCreateEvent, DirectMessageCreateEvent, MessageEvent
 """消息事件类型"""
-GeneralPrivateMessageEvent = PrivateMessageEvent, DirectMessageCreateEvent, OneBotV12PrivateMessageEvent
+GeneralPrivateMessageEvent = PrivateMessageEvent, DirectMessageCreateEvent
 """私聊消息事件类型"""
-GeneralGroupMessageEvent = GroupMessageEvent, MessageCreateEvent, OneBotV12GroupMessageEvent
+GeneralGroupMessageEvent = GroupMessageEvent, MessageCreateEvent
 """群聊消息事件类型"""
 
 
@@ -260,7 +260,7 @@ async def get_validate(user: UserData, gt: str = None, challenge: str = None):
     debug_log = {"geetest_url": geetest_url, "params": params, "content": content}
     logger.debug(f"{plugin_config.preference.log_head}get_validate: {debug_log}")
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
+        async with httpx.AsyncClient() as client:
             res = await client.post(
                 geetest_url,
                 params=params,
@@ -307,7 +307,7 @@ async def get_file(url: str, retry: bool = True):
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(url, timeout=plugin_config.preference.timeout, follow_redirects=True)
                 return res.content
     except tenacity.RetryError:

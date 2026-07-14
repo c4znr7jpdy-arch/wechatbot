@@ -11,14 +11,16 @@ from ..model import BaseApiStatus, MissionStatus, MissionData, \
 from ..utils import logger, generate_ds, \
     get_async_retry, get_validate
 
-URL_SIGN = "https://bbs-api.mihoyo.com/apihub/app/api/signIn"
-URL_GET_POST = "https://bbs-api.miyoushe.com/post/api/feeds/posts?fresh_action=1&gids={}&is_first_initialize=false" \
-               "&last_id="
+URL_SIGN = "https://bbs-api.miyoushe.com/apihub/app/api/signIn"
+URL_GET_POST = "https://bbs-api.miyoushe.com/post/api/getForumPostList"
 URL_READ = "https://bbs-api.miyoushe.com/post/api/getPostFull?post_id={}"
-URL_LIKE = "https://bbs-api.miyoushe.com/post/api/post/upvote"
+URL_LIKE = "https://bbs-api.miyoushe.com/apihub/sapi/upvotePost"
 URL_SHARE = "https://bbs-api.miyoushe.com/apihub/api/getShareConf?entity_id={}&entity_type=1"
 URL_MISSION = "https://api-takumi.mihoyo.com/apihub/wapi/getMissions?point_sn=myb"
 URL_MISSION_STATE = "https://api-takumi.mihoyo.com/apihub/wapi/getUserMissionsState?point_sn=myb"
+# 米游社 Android 2.109.0 的 App DS salt。点赞、分享接口校验此签名；
+# 旧插件的 SALT_ANDROID 对应早期客户端，会返回 invalid DS。
+SALT_MYS_APP = "47f15f1b66bee46b816115d8e8e6ebb6"
 HEADERS_BASE = {
     "Host": "bbs-api.miyoushe.com",
     "Referer": "https://app.mihoyo.com",
@@ -30,6 +32,10 @@ HEADERS_BASE = {
     "x-rpc-device_model": plugin_env.device_config.X_RPC_DEVICE_MODEL_ANDROID,
     "x-rpc-device_name": plugin_env.device_config.X_RPC_DEVICE_NAME_ANDROID,
     "x-rpc-sys_version": plugin_env.device_config.X_RPC_SYS_VERSION_ANDROID,
+    "x-rpc-h265_supported": "1",
+    "x-rpc-verify_key": "bll8iq97cem8",
+    "x-rpc-csm_source": "discussion",
+    "Content-Type": "application/json; charset=UTF-8",
     "Accept-Encoding": "gzip",
     "Connection": "Keep-Alive",
     "DS": None
@@ -71,10 +77,24 @@ HEADERS_OLD = {
     "x-rpc-device_model": plugin_env.device_config.X_RPC_DEVICE_MODEL_ANDROID,
     "x-rpc-device_name": plugin_env.device_config.X_RPC_DEVICE_NAME_ANDROID,
     "x-rpc-sys_version": plugin_env.device_config.X_RPC_SYS_VERSION_ANDROID,
+    "x-rpc-h265_supported": "1",
+    "x-rpc-verify_key": "bll8iq97cem8",
+    "x-rpc-csm_source": "discussion",
+    "Content-Type": "application/json; charset=UTF-8",
     "Accept-Encoding": "gzip",
     "Connection": "Keep-Alive",
     "DS": None
 }
+
+
+def _stoken_cookies(account: UserAccount) -> Dict[str, str]:
+    cookies = {
+        "stuid": account.cookies.bbs_uid,
+        "stoken": account.cookies.stoken,
+    }
+    if account.cookies.stoken_v2 and account.cookies.mid:
+        cookies["mid"] = account.cookies.mid
+    return {key: value for key, value in cookies.items() if value}
 
 
 class BaseMission:
@@ -107,6 +127,8 @@ class BaseMission:
         self.account = account
         self.headers = HEADERS_BASE.copy()
         self.headers["x-rpc-device_id"] = account.device_id_android
+        if account.device_fp:
+            self.headers["x-rpc-device_fp"] = account.device_fp
 
     async def sign(self, user: UserData, retry: bool = True) -> Tuple[MissionStatus, Optional[int]]:
         """
@@ -116,14 +138,16 @@ class BaseMission:
         :param retry: 是否允许重试
         :return: (BaseApiStatus, 签到获得的米游币数量)
         """
+        res = httpx.Response(0)
         content = {"gids": str(self.gids)}
         retrying = get_async_retry(retry)
-        retrying.retry = retrying.retry and tenacity.retry_if_result(lambda x: x is None)
         try:
             async for attempt in retrying:
                 with attempt:
                     headers = HEADERS_OLD.copy()
                     headers["x-rpc-device_id"] = self.account.device_id_android
+                    if self.account.device_fp:
+                        headers["x-rpc-device_fp"] = self.account.device_fp
                     headers["DS"] = generate_ds(data=content)
                     async with httpx.AsyncClient(trust_env=False) as client:
                         res = await client.post(
@@ -131,7 +155,7 @@ class BaseMission:
                             headers=headers,
                             json=content,
                             timeout=plugin_config.preference.timeout,
-                            cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                            cookies=_stoken_cookies(self.account)
                         )
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -190,6 +214,7 @@ class BaseMission:
         :param retry: 是否允许重试
         :return: (BaseApiStatus, 文章ID列表)
         """
+        res = httpx.Response(0)
         post_id_list = []
         try:
             async for attempt in get_async_retry(retry):
@@ -198,7 +223,14 @@ class BaseMission:
                     headers["x-rpc-device_id"] = self.account.device_id_ios
                     async with httpx.AsyncClient(trust_env=False) as client:
                         res = await client.get(
-                            URL_GET_POST.format(self.gids),
+                            URL_GET_POST,
+                            params={
+                                "forum_id": str(self.fid),
+                                "is_good": "false",
+                                "is_hot": "false",
+                                "page_size": 20,
+                                "sort_type": 1,
+                            },
                             headers=headers,
                             timeout=plugin_config.preference.timeout
                         )
@@ -217,16 +249,17 @@ class BaseMission:
                 logger.exception(f"米游币任务 - 获取文章列表: 请求失败")
                 return BaseApiStatus(network_error=True), None
 
-    async def read(self, read_times: int = 5, retry: bool = True) -> MissionStatus:
+    async def read(self, read_times: int = 3, retry: bool = True) -> MissionStatus:
         """
         阅读
 
         :param read_times: 阅读文章数
         :param retry: 是否允许重试
         """
+        res = httpx.Response(0)
         count = 0
         get_post_status, posts = await self.get_posts(retry)
-        if not get_post_status:
+        if not get_post_status or not posts:
             return MissionStatus(failed_getting_post=True)
         while count < read_times:
             for post_id in posts:
@@ -241,7 +274,7 @@ class BaseMission:
                                     URL_READ.format(post_id),
                                     headers=self.headers,
                                     timeout=plugin_config.preference.timeout,
-                                    cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                                    cookies=_stoken_cookies(self.account)
                                 )
                             api_result = ApiResultHandler(res.json())
                             if api_result.login_expired:
@@ -276,16 +309,17 @@ class BaseMission:
 
         return MissionStatus(success=True)
 
-    async def like(self, like_times: int = 10, retry: bool = True) -> MissionStatus:
+    async def like(self, like_times: int = 5, retry: bool = True) -> MissionStatus:
         """
         点赞文章
 
         :param like_times: 点赞次数
         :param retry: 是否允许重试
         """
+        res = httpx.Response(0)
         count = 0
         get_post_status, posts = await self.get_posts(retry)
-        if not get_post_status:
+        if not get_post_status or not posts:
             return MissionStatus(failed_getting_post=True)
         while count < like_times:
             for post_id in posts:
@@ -296,13 +330,13 @@ class BaseMission:
                         with attempt:
                             headers = HEADERS_OLD.copy()
                             headers["x-rpc-device_id"] = self.account.device_id_android
-                            headers["DS"] = generate_ds(platform="android")
+                            headers["DS"] = generate_ds(salt=SALT_MYS_APP)
                             async with httpx.AsyncClient(trust_env=False) as client:
                                 res = await client.post(
                                     URL_LIKE, headers=headers,
                                     json={'is_cancel': False, 'post_id': post_id},
                                     timeout=plugin_config.preference.timeout,
-                                    cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                                    cookies=_stoken_cookies(self.account)
                                 )
                             api_result = ApiResultHandler(res.json())
                             if api_result.login_expired:
@@ -320,6 +354,23 @@ class BaseMission:
                             if api_result.message != "OK":
                                 raise ValueError
                             count += 1
+                            # 与当前维护中的米游社任务工具保持一致：任务计数后撤销点赞，
+                            # 避免机器人替用户永久改变帖子点赞状态。
+                            try:
+                                await asyncio.sleep(plugin_config.preference.sleep_time)
+                                headers["DS"] = generate_ds(salt=SALT_MYS_APP)
+                                async with httpx.AsyncClient(trust_env=False) as client:
+                                    await client.post(
+                                        URL_LIKE,
+                                        headers=headers,
+                                        json={'is_cancel': True, 'post_id': post_id},
+                                        timeout=plugin_config.preference.timeout,
+                                        cookies=_stoken_cookies(self.account)
+                                    )
+                            except httpx.HTTPError:
+                                logger.warning(
+                                    f"米游币任务 - 点赞: 撤销帖子 {post_id} 的点赞失败"
+                                )
                 except tenacity.RetryError as e:
                     if is_incorrect_return(e, ValueError):
                         logger.exception(f"米游币任务 - 点赞: 服务器没有正确返回")
@@ -342,6 +393,7 @@ class BaseMission:
 
         :param retry: 是否允许重试
         """
+        res = httpx.Response(0)
         get_post_status, posts = await self.get_posts(retry)
         if not get_post_status or not posts:
             return MissionStatus(failed_getting_post=True)
@@ -350,13 +402,13 @@ class BaseMission:
                 with attempt:
                     headers = HEADERS_OLD.copy()
                     headers["x-rpc-device_id"] = self.account.device_id_android
-                    headers["DS"] = generate_ds(platform="android")
+                    headers["DS"] = generate_ds(salt=SALT_MYS_APP)
                     async with httpx.AsyncClient(trust_env=False) as client:
                         res = await client.get(
                             URL_SHARE.format(posts[0]),
                             headers=headers,
                             timeout=plugin_config.preference.timeout,
-                            cookies=self.account.cookies.dict(v2_stoken=True, cookie_type=True)
+                            cookies=_stoken_cookies(self.account)
                         )
                     api_result = ApiResultHandler(res.json())
                     if api_result.login_expired:
@@ -435,7 +487,7 @@ class BBSMission(BaseMission):
     """
     name = "综合"
     gids = 5
-    # TODO: bbs fid暂时未知
+    fid = 34
 
 
 class ZenlessZoneZero(BaseMission):
@@ -466,6 +518,7 @@ async def get_missions(account: UserAccount, retry: bool = True) -> Tuple[BaseAp
     :param account: 用户账号
     :param retry: 是否允许重试
     """
+    res = httpx.Response(0)
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
@@ -500,7 +553,8 @@ async def get_missions_state(account: UserAccount, retry: bool = True) -> Tuple[
     :param account: 用户账号
     :param retry: 是否允许重试
     """
-    get_missions_status, missions = await get_missions(account)
+    res = httpx.Response(0)
+    get_missions_status, missions = await get_missions(account, retry=retry)
     if not get_missions_status:
         return get_missions_status, None
     try:

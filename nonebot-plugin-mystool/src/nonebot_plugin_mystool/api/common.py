@@ -5,7 +5,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
 import tenacity
-from pydantic import ValidationError, BaseModel
+from pydantic.v1 import ValidationError, BaseModel
 from requests.utils import dict_from_cookiejar
 
 from ..model import GameRecord, GameInfo, Good, Address, BaseApiStatus, MmtData, GeetestResult, \
@@ -347,35 +347,32 @@ class ApiResultHandler(BaseModel):
     """
     API返回的数据处理器
     """
-    content: Dict[str, Any] = {}
+    content: Dict[str, Any]
     """API返回的JSON对象序列化以后的Dict对象"""
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[Dict[str, Any]]
     """API返回的数据体"""
-    message: Optional[str] = None
+    message: Optional[str]
     """API返回的消息内容"""
-    retcode: Optional[int] = None
+    retcode: Optional[int]
     """API返回的状态码"""
 
     def __init__(self, content: Dict[str, Any]):
-        # 直接设置属性，跳过Pydantic验证
-        object.__setattr__(self, 'content', content)
-        object.__setattr__(self, 'data', content.get("data") if content else None)
+        super().__init__(content=content)
 
-        retcode = None
+        self.data = self.content.get("data")
+
         for key in ["retcode", "status"]:
-            if retcode is None:
-                retcode = content.get(key) if content else None
-                if retcode is None and self.data:
-                    retcode = self.data.get(key)
-        object.__setattr__(self, 'retcode', retcode)
+            if self.retcode is None:
+                self.retcode = self.content.get(key)
+                if self.retcode is None:
+                    self.retcode = self.data.get(key) if self.data else None
 
-        message = None
+        self.message: Optional[str] = None
         for key in ["message", "msg"]:
-            if not message:
-                message = content.get(key) if content else None
-                if not message and self.data:
-                    message = self.data.get(key)
-        object.__setattr__(self, 'message', message)
+            if not self.message:
+                self.message = self.content.get(key)
+                if not self.message:
+                    self.message = self.data.get(key) if self.data else None
 
     @property
     def success(self):
@@ -563,7 +560,7 @@ async def device_save(account: UserAccount, retry: bool = True):
         async for attempt in get_async_retry(retry):
             with attempt:
                 headers["DS"] = generate_ds(data)
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.post(URL_DEVICE_SAVE, headers=headers, json=data,
                                             cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
                                             timeout=plugin_config.preference.timeout)
@@ -599,7 +596,7 @@ async def get_good_detail(good: Union[Good, str], retry: bool = True) -> Tuple[G
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(URL_CHECK_GOOD.format(good_id), timeout=plugin_config.preference.timeout)
                 api_result = ApiResultHandler(res.json())
                 # -2109 商品不存在；-2105 商品已下架
@@ -629,7 +626,7 @@ async def get_good_games(retry: bool = True) -> Tuple[BaseApiStatus, Optional[Li
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(URL_GOOD_LIST.format(page=1,
                                                                 game=""),
                                            headers=HEADERS_GOOD_LIST,
@@ -663,7 +660,7 @@ async def get_good_list(game: str = "", retry: bool = True) -> Tuple[
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(URL_GOOD_LIST.format(page=page,
                                                                 game=game), headers=HEADERS_GOOD_LIST,
                                            timeout=plugin_config.preference.timeout)
@@ -699,7 +696,7 @@ async def get_address(account: UserAccount, retry: bool = True) -> Tuple[BaseApi
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(URL_ADDRESS.format(
                         round(time.time() * 1000)), headers=headers,
                         cookies=account.cookies.dict(v2_stoken=True, cookie_type=True),
@@ -754,9 +751,9 @@ async def check_registrable(phone_number: int, keep_client: bool = False, retry:
         async for attempt in get_async_retry(retry):
             with attempt:
                 if keep_client:
-                    client = httpx.AsyncClient(trust_env=False)
+                    client = httpx.AsyncClient()
                 else:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await request()
                 res = await request()
                 api_result = ApiResultHandler(res.json())
@@ -813,7 +810,7 @@ async def create_mmt(client: Optional[httpx.AsyncClient] = None,
                 if client:
                     res = await request()
                 else:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await request()
                 api_result = ApiResultHandler(res.json())
                 return BaseApiStatus(success=True), MmtData.parse_obj(api_result.data["mmt_data"]), device_id, client
@@ -891,7 +888,7 @@ async def create_mobile_captcha(phone_number: str,
                 if client and not client.is_closed:
                     res = await request()
                 else:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await request()
                 api_result = ApiResultHandler(res.json())
                 if api_result.success:
@@ -966,7 +963,7 @@ async def get_login_ticket_by_captcha(phone_number: str,
                 if client is not None:
                     res = await request()
                 else:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await request()
                 api_result = ApiResultHandler(res.json())
                 if api_result.success:
@@ -1011,7 +1008,7 @@ async def get_multi_token_by_login_ticket(cookies: BBSCookies, retry: bool = Tru
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(
                         URL_MULTI_TOKEN_BY_LOGIN_TICKET.format(cookies.login_ticket, cookies.bbs_uid),
                         headers=HEADERS_API_TAKUMI_PC,
@@ -1054,7 +1051,7 @@ async def get_cookie_token_by_captcha(phone_number: str, captcha: int, retry: bo
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.post(URL_COOKIE_TOKEN_BY_CAPTCHA,
                                             headers=HEADERS_API_TAKUMI_PC,
                                             json={
@@ -1116,7 +1113,7 @@ async def get_login_ticket_by_password(account: str, password: str, mmt_data: Mm
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.post(
                         URL_LOGIN_TICKET_BY_PASSWORD,
                         content=encoded_params,
@@ -1162,7 +1159,7 @@ async def get_cookie_token_by_stoken(cookies: BBSCookies, device_id: str = None,
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(
                         URL_COOKIE_TOKEN_BY_STOKEN,
                         cookies=cookies.dict(v2_stoken=True, cookie_type=True),
@@ -1216,7 +1213,7 @@ async def get_stoken_v2_by_v1(cookies: BBSCookies, device_id: str = None, retry:
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     headers.setdefault("DS", generate_ds(salt=plugin_env.salt_config.SALT_PROD))
                     res = await client.post(
                         URL_STOKEN_V2_BY_V1,
@@ -1271,7 +1268,7 @@ async def get_ltoken_by_stoken(cookies: BBSCookies, device_id: str = None, retry
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(
                         URL_LTOKEN_BY_STOKEN,
                         cookies=cookies.dict(v2_stoken=True, cookie_type=True),
@@ -1329,7 +1326,7 @@ async def get_device_fp(device_id: str, retry: bool = True) -> Tuple[GetFpStatus
     try:
         async for attempt in get_async_retry(retry):
             with attempt:
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.post(
                         URL_GET_DEVICE_FP,
                         json=content,
@@ -1382,7 +1379,7 @@ async def good_exchange(plan: ExchangePlan) -> Tuple[ExchangeStatus, Optional[Ex
     start_time = 0
     try:
         start_time = time.time()
-        async with httpx.AsyncClient(trust_env=False) as client:
+        async with httpx.AsyncClient() as client:
             res = await client.post(
                 URL_EXCHANGE, headers=headers, json=content,
                 cookies=plan.account.cookies.dict(cookie_type=True),
@@ -1508,7 +1505,7 @@ async def genshin_note(account: UserAccount) -> Tuple[
                     with attempt:
                         headers["DS"] = generate_ds(
                             params={"role_id": record.game_role_id, "server": record.region})
-                        async with httpx.AsyncClient(trust_env=False) as client:
+                        async with httpx.AsyncClient() as client:
                             res = await client.get(
                                 URL_GENSHEN_NOTE_BBS,
                                 headers=headers,
@@ -1534,7 +1531,7 @@ async def genshin_note(account: UserAccount) -> Tuple[
                         if not api_result.success:
                             headers["DS"] = generate_ds()
                             headers["x-rpc-device_id"] = account.device_id_ios
-                            async with httpx.AsyncClient(trust_env=False) as client:
+                            async with httpx.AsyncClient() as client:
                                 res = await client.get(
                                     URL_GENSHEN_NOTE_WIDGET,
                                     headers=headers,
@@ -1588,7 +1585,7 @@ async def starrail_note(account: UserAccount) -> Tuple[
                 async for attempt in get_async_retry(False):
                     with attempt:
                         headers["DS"] = generate_ds(data={})
-                        async with httpx.AsyncClient(trust_env=False) as client:
+                        async with httpx.AsyncClient() as client:
                             cookies = account.cookies.dict(v2_stoken=True, cookie_type=True)
                             res = await client.get(url, headers=headers,
                                                    cookies=cookies,
@@ -1640,7 +1637,7 @@ async def create_verification(
                 headers["x-rpc-device_fp"] = account.device_fp if account and account.device_fp else \
                     generate_fp_locally()
                 headers["DS"] = generate_ds(salt=plugin_env.salt_config.SALT_BBS)
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.get(
                         URL_CREATE_VERIFICATION,
                         headers=headers,
@@ -1687,7 +1684,7 @@ async def verify_verification(
                 headers["x-rpc-device_fp"] = account.device_fp if account and account.device_fp else \
                     generate_fp_locally()
                 headers["DS"] = generate_ds(salt=plugin_env.salt_config.SALT_BBS)
-                async with httpx.AsyncClient(trust_env=False) as client:
+                async with httpx.AsyncClient() as client:
                     res = await client.post(
                         URL_VERIFY_VERIFICATION,
                         headers=headers,
@@ -1729,13 +1726,12 @@ async def fetch_game_token_qrcode(
                     "app_id": app_id,
                     "device": device_id,
                 }
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     res = await client.post(
                         URL_FETCH_GAME_TOKEN_QRCODE,
                         json=content,
                         timeout=plugin_config.preference.timeout
                     )
-                logger.debug(f"fetch_game_token_qrcode 响应: {res.text}")
                 api_result = ApiResultHandler(res.json())
                 if api_result.retcode == 0:
                     qrcode_url = api_result.data["url"]
@@ -1777,7 +1773,7 @@ async def query_game_token_qrcode(
                     "device": device_id,
                     "ticket": ticket
                 }
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     res = await client.post(
                         URL_QUERY_GAME_TOKEN_QRCODE,
                         json=content,
@@ -1829,7 +1825,7 @@ async def get_token_by_game_token(
                     "account_id": int(bbs_uid),
                     "game_token": game_token
                 }
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     res = await client.post(
                         URL_GET_TOKEN_BY_GAME_TOKEN,
                         headers={"x-rpc-app_id": "bll8iq97cem8"},
@@ -1873,7 +1869,7 @@ async def get_cookie_token_by_game_token(
                     "account_id": int(bbs_uid),
                     "game_token": game_token
                 }
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     res = await client.post(
                         URL_GET_COOKIE_TOKEN_BY_GAME_TOKEN,
                         headers={"x-rpc-app_id": "bll8iq97cem8"},

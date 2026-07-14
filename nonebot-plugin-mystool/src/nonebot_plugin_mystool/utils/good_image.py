@@ -86,7 +86,7 @@ async def game_list_to_image(good_list: List[Good], lock: Lock = None, retry: bo
             await get_good_detail(good)
             async for attempt in get_async_retry(retry):
                 with attempt:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         icon = await client.get(good.icon, timeout=plugin_config.preference.timeout)
             img = Image.open(io.BytesIO(icon.content))
             # 调整预览图大小

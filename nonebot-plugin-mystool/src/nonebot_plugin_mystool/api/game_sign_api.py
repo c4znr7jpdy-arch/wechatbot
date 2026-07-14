@@ -74,7 +74,7 @@ class BaseGameSign:
         try:
             async for attempt in get_async_retry(retry):
                 with attempt:
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await client.get(self.url_reward, headers=self.headers_reward,
                                                timeout=plugin_config.preference.timeout)
                     award_list = []
@@ -108,7 +108,7 @@ class BaseGameSign:
             async for attempt in get_async_retry(retry):
                 with attempt:
                     headers["DS"] = generate_ds() if platform == "ios" else generate_ds(platform="android")
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await client.get(self.url_info, headers=headers,
                                                cookies=self.account.cookies.dict(),
                                                timeout=plugin_config.preference.timeout)
@@ -181,7 +181,7 @@ class BaseGameSign:
                         headers["x-rpc-seccode"] = geetest_result.seccode
                         logger.info("游戏签到 - 尝试使用人机验证结果进行签到")
 
-                    async with httpx.AsyncClient(trust_env=False) as client:
+                    async with httpx.AsyncClient() as client:
                         res = await client.post(
                             self.url_sign,
                             headers=headers,

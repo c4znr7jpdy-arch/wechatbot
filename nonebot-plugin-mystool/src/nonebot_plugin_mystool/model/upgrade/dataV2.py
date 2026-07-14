@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from httpx import Cookies
 from nonebot.log import logger
-from pydantic import BaseModel, ValidationError, field_validator, ConfigDict
+from pydantic.v1 import BaseModel, ValidationError, validator
 
 from ..._version import __version__
 from ...model.common import data_path, BaseModelWithSetter, Address, BaseModelWithUpdate, Good, GameRecord
@@ -373,7 +373,7 @@ class UserData(BaseModelWithSetter):
     accounts: Dict[str, UserAccount] = {}
     """储存一些已绑定的账号数据"""
 
-    @field_validator("uuid", mode="before")
+    @validator("uuid")
     def uuid_validator(cls, v):
         """
         验证UUID是否为合法的UUIDv4
@@ -382,7 +382,6 @@ class UserData(BaseModelWithSetter):
         """
         if v is None and not uuid4_validate(v):
             raise ValueError("UUID格式错误，不是合法的UUIDv4")
-        return v
 
     def __init__(self, **data: Any):
         global _new_uuid_in_init
@@ -442,7 +441,8 @@ class PluginData(BaseModel):
         super().__init__(**data)
         self.do_user_bind(write=True)
 
-    model_config = ConfigDict()
+    class Config:
+        json_encoders = UserAccount.Config.json_encoders
 
 
 class PluginDataManager:
@@ -470,7 +470,7 @@ class PluginDataManager:
         else:
             cls.plugin_data = PluginData()
             try:
-                str_data = cls.plugin_data.model_dump_json(indent=4)
+                str_data = cls.plugin_data.json(indent=4)
                 with open(plugin_data_path, "w", encoding="utf-8") as f:
                     f.write(str_data)
             except (AttributeError, TypeError, ValueError, PermissionError):

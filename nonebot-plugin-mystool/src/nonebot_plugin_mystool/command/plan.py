@@ -14,7 +14,7 @@ from nonebot.internal.matcher import Matcher
 from nonebot.params import CommandArg
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_saa import Image
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 
 from ..api import BaseGameSign
 from ..api import BaseMission, get_missions_state
@@ -151,8 +151,8 @@ class NoteNoticeStatus(BaseModel):
     """
     账号便笺通知状态
     """
-    genshin: GenshinNoteNotice = GenshinNoteNotice()
-    starrail: StarRailNoteNotice = StarRailNoteNotice()
+    genshin = GenshinNoteNotice()
+    starrail = StarRailNoteNotice()
 
 
 note_notice_status: Dict[str, NoteNoticeStatus] = {}

@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Union, Optional, Tuple, Any, Dict, TYPE_CHECKING
 
 from nonebot.log import logger
-from pydantic import BaseModel, ConfigDict, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.v1 import BaseModel, BaseSettings, validator
 
 from ...model.common import data_path
 
@@ -73,7 +72,7 @@ class Preference(BaseModel):
     '''每日自动签到和米游社任务的定时任务执行时间，格式为HH:MM'''
     resin_interval: int = 60
     '''每次检查原神便笺间隔，单位为分钟'''
-    geetest_url: Optional[str] = None
+    geetest_url: Optional[str]
     '''极验Geetest人机验证打码接口URL'''
     geetest_params: Optional[Dict[str, Any]] = None
     '''极验Geetest人机验证打码API发送的参数（除gt，challenge外）'''
@@ -97,10 +96,8 @@ class Preference(BaseModel):
     admin_list_path: Optional[Path] = data_path / "admin_list.txt"
     """管理员名单文件路径"""
 
-    @field_validator("log_path", mode="after")
+    @validator("log_path", allow_reuse=True)
     def _(cls, v: Optional[Path]):
-        if v is None:
-            return v
         absolute_path = v.absolute()
         if not os.path.exists(absolute_path) or not os.path.isfile(absolute_path):
             absolute_parent = absolute_path.parent
@@ -166,7 +163,8 @@ class SaltConfig(BaseModel):
     SALT_BBS: str = "b0EofkfMKq2saWV9fwux18J5vzcFTlex"
     '''BBS App 接口专用createVerification/verifyVerification'''
 
-    model_config = ConfigDict()
+    class Config(Preference.Config):
+        pass
 
 
 class DeviceConfig(BaseModel):
@@ -224,16 +222,19 @@ class DeviceConfig(BaseModel):
     UA_PLATFORM: str = "\"macOS\""
     '''Headers所用的 sec-ch-ua-platform'''
 
-    model_config = ConfigDict()
+    class Config(Preference.Config):
+        pass
 
 
 class PluginConfig(BaseSettings):
-    preference: Preference = Preference()
-    good_list_image_config: GoodListImageConfig = GoodListImageConfig()
+    preference = Preference()
+    good_list_image_config = GoodListImageConfig()
 
 
 class PluginEnv(BaseSettings):
-    salt_config: SaltConfig = SaltConfig()
-    device_config: DeviceConfig = DeviceConfig()
+    salt_config = SaltConfig()
+    device_config = DeviceConfig()
 
-    model_config = SettingsConfigDict(env_prefix="mystool_", env_file='.env')
+    class Config(BaseSettings.Config):
+        env_prefix = "mystool_"
+        env_file = '.env'

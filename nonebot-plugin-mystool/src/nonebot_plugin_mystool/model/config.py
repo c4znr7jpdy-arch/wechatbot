@@ -6,8 +6,7 @@ from typing import Union, Optional, Tuple, Any, Dict, TYPE_CHECKING
 
 import nonebot
 from nonebot.log import logger
-from pydantic import BaseModel, ConfigDict, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.v1 import BaseModel, BaseSettings, validator
 
 from ..model.common import data_path
 
@@ -75,7 +74,7 @@ class Preference(BaseModel):
     '''每次检查原神便笺间隔，单位为分钟'''
     global_geetest: bool = False
     '''是否使用插件配置的全局打码接口，而不是用户个人配置的打码接口，默认关闭'''
-    geetest_url: Optional[str] = None
+    geetest_url: Optional[str]
     '''极验Geetest人机验证打码接口URL'''
     geetest_params: Optional[Dict[str, Any]] = None
     '''极验Geetest人机验证打码API发送的参数（除gt，challenge外）'''
@@ -100,15 +99,13 @@ class Preference(BaseModel):
     """管理员名单文件路径"""
     game_token_app_id: str = "4"
     """米游社二维码登录的应用标识符"""
-    qrcode_query_interval: float = 2
+    qrcode_query_interval: float = 1
     """检查米游社登录二维码扫描情况的请求间隔（单位：秒）"""
     qrcode_wait_time: float = 120
     """等待米游社登录二维码扫描的最长时间（单位：秒）"""
 
-    @field_validator("log_path", mode="after")
+    @validator("log_path", allow_reuse=True)
     def _(cls, v: Optional[Path]):
-        if v is None:
-            return v
         absolute_path = v.absolute()
         if not os.path.exists(absolute_path) or not os.path.isfile(absolute_path):
             absolute_parent = absolute_path.parent
@@ -177,7 +174,8 @@ class SaltConfig(BaseModel):
     SALT_BBS: str = "b0EofkfMKq2saWV9fwux18J5vzcFTlex"
     '''BBS App 接口专用createVerification/verifyVerification'''
 
-    model_config = ConfigDict()
+    class Config(Preference.Config):
+        pass
 
 
 class DeviceConfig(BaseModel):
@@ -226,7 +224,7 @@ class DeviceConfig(BaseModel):
     X_RPC_CHANNEL_ANDROID: str = "miyousheluodi"
     '''安卓端 x-rpc-channel'''
 
-    X_RPC_APP_VERSION: str = "2.63.1"
+    X_RPC_APP_VERSION: str = "2.109.0"
     '''Headers所用的 x-rpc-app_version'''
     X_RPC_PLATFORM: str = "ios"
     '''Headers所用的 x-rpc-platform'''
@@ -235,19 +233,22 @@ class DeviceConfig(BaseModel):
     UA_PLATFORM: str = "\"macOS\""
     '''Headers所用的 sec-ch-ua-platform'''
 
-    model_config = ConfigDict()
+    class Config(Preference.Config):
+        pass
 
 
 class PluginConfig(BaseSettings):
-    preference: Preference = Preference()
-    good_list_image_config: GoodListImageConfig = GoodListImageConfig()
+    preference = Preference()
+    good_list_image_config = GoodListImageConfig()
 
 
 class PluginEnv(BaseSettings):
-    salt_config: SaltConfig = SaltConfig()
-    device_config: DeviceConfig = DeviceConfig()
+    salt_config = SaltConfig()
+    device_config = DeviceConfig()
 
-    model_config = SettingsConfigDict(env_prefix="mystool_", env_file='.env')
+    class Config(BaseSettings.Config):
+        env_prefix = "mystool_"
+        env_file = '.env'
 
 
 if plugin_config_path.exists() and plugin_config_path.is_file():
@@ -255,7 +256,7 @@ if plugin_config_path.exists() and plugin_config_path.is_file():
 else:
     plugin_config = PluginConfig()
     try:
-        str_data = plugin_config.model_dump_json(indent=4)
+        str_data = plugin_config.json(indent=4)
         plugin_config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(plugin_config_path, "w", encoding="utf-8") as f:
             f.write(str_data)

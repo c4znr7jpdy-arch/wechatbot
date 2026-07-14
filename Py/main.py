@@ -1126,6 +1126,13 @@ class AstrBotWsClient:
             seg_data = seg.get("data", {}) or {}
             if seg_type == "wechat_link_card":
                 return seg_data
+            if seg_type == "share":
+                return {
+                    "title": seg_data.get("title") or "链接",
+                    "desc": seg_data.get("content") or seg_data.get("desc") or "",
+                    "url": seg_data.get("url") or "",
+                    "image_url": seg_data.get("image") or seg_data.get("image_url") or "",
+                }
             if seg_type != "music":
                 continue
 
@@ -1704,11 +1711,16 @@ def _lookup_member_nickname(room_wxid: str, wxid: str) -> str:
     return _load_user_aliases().get(wxid, "")
 
 def _build_sender_info(wxid: str, room_wxid: str = "", fallback_nickname: str = "") -> dict:
-    nickname = _lookup_member_nickname(room_wxid, wxid) or fallback_nickname or ""
+    member = _GROUP_MEMBER_CACHE.get(room_wxid, {}).get(wxid, {})
+    member = member if isinstance(member, dict) else {}
+    display_name = str(member.get("display_name") or "")
+    nickname = str(member.get("nickname") or fallback_nickname or "")
+    sender_label = display_name or nickname or str(member.get("remark") or "")
     return {
         "user_id": wxid,
-        "nickname": nickname,
-        "card": nickname,
+        "nickname": nickname or sender_label,
+        "card": sender_label,
+        "display_name": display_name,
         "wx_nickname": nickname,
         "call_aliases": _get_member_call_aliases(room_wxid, wxid),
     }
@@ -3893,7 +3905,9 @@ def main():
     )
     astrbot_ws.get_user_info_fn = lambda t, wxid: service.helper_get_contact_info(t, wxid)
     astrbot_ws.get_group_member_info_fn = lambda t, room: service.helper_get_group_member_list(t, room)
-    astrbot_ws.send_link_card_fn = lambda to_wxid, title, desc, url, image_url: service.helper_send_cdn_link_card(to_wxid, title, desc, url, image_url)
+    # 普通链接卡片（11039）会主动读取 image_url 作为右侧封面。
+    # 11236 在当前微信 DLL 中虽然能发出卡片，却会忽略外部图片并显示默认链接图标。
+    astrbot_ws.send_link_card_fn = lambda to_wxid, title, desc, url, image_url: service.helper_send_url(to_wxid, title, desc, url, image_url)
     set_astrbot_ws_client(astrbot_ws)
 
     # Bug2修复: 保存事件循环引用，供跨线程调度使用

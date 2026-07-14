@@ -13,19 +13,19 @@ from ..utils.common import PLUGIN, COMMAND_BEGIN, GeneralMessageEvent, logger, g
 __all__ = ["helper"]
 
 helper = on_command(
-    f"{plugin_config.preference.command_start}米游社帮助",
+    f"{plugin_config.preference.command_start}帮助",
     priority=1,
-    aliases={f"{plugin_config.preference.command_start}米help"},
+    aliases={f"{plugin_config.preference.command_start}help"},
     block=True
 )
 
 CommandRegistry.set_usage(
     helper,
     CommandUsage(
-        name="米游社帮助",
+        name="帮助",
         description="🍺欢迎使用米游社小助手帮助系统！\n"
-                    "{HEAD}米游社帮助 ➢ 查看米游社小助手使用说明\n"
-                    "{HEAD}米游社帮助 <功能名> ➢ 查看目标功能详细说明"
+                    "{HEAD}帮助 ➢ 查看米游社小助手使用说明\n"
+                    "{HEAD}帮助 <功能名> ➢ 查看目标功能详细说明"
     )
 )
 

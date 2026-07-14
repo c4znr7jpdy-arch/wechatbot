@@ -11,6 +11,10 @@ AstrBot itself runs on Python 3.13 (in `astrbot_venv`).
 
 ## Starting the Project
 
+### Process Control Rule
+
+**Do not start, stop, or restart AstrBot or `Py/main.py` unless the user explicitly authorizes that exact process operation in the current request.** Code changes, testing, plugin reloads, and verification do not imply permission to alter either running process. Never auto-start either process after stopping it.
+
 Two required processes, start in order. The local NetEase Cloud Music API is auto-started by `astrbot_plugin_music` when AstrBot loads and `nodejs_base_url` points to `127.0.0.1` / `localhost`.
 
 ```bash

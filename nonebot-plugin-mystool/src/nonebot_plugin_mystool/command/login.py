@@ -59,28 +59,22 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
             device_id,
             plugin_config.preference.game_token_app_id
         )
-        if not login_status:
-            # 网络错误或其他失败，给用户反馈
-            if login_status.network_error:
-                await get_cookie.finish("⚠️网络连接失败，请稍后重试")
-            elif login_status.incorrect_return:
-                await get_cookie.finish("⚠️服务器返回异常，请稍后重试")
-            else:
-                await get_cookie.finish("⚠️登录失败，请检查网络后重试")
         if fetch_qrcode_ret:
             qrcode_url, qrcode_ticket = fetch_qrcode_ret
-            await get_cookie.send("请用米游社App扫描下面的二维码进行登录（请在30秒内完成扫码）")
+            await get_cookie.send("请用米游社App扫描下面的二维码进行登录")
             image_bytes = generate_qr_img(qrcode_url)
-            from nonebot_plugin_saa import Image
-            try:
-                from nonebot.adapters.onebot.v12.exception import ActionFailed as V12ActionFailed
-            except ImportError:
-                V12ActionFailed = ActionFailed
-            try:
-                await Image(image_bytes).send(reply=False)
-            except Exception as e:
-                logger.exception("发送包含二维码的登录消息失败")
+            if isinstance(event, OneBotV11MessageEvent):
+                msg_img = OneBotV11MessageSegment.image(image_bytes)
+            elif isinstance(event, QQGuildMessageEvent):
+                msg_img = QQGuildMessageSegment.file_image(image_bytes)
+            else:
                 await get_cookie.finish("⚠️发送二维码失败，无法登录")
+            try:
+                await get_cookie.send(msg_img)
+            except (ActionFailed, AuditException) as e:
+                if isinstance(e, ActionFailed):
+                    logger.exception("发送包含二维码的登录消息失败")
+                    await get_cookie.finish("⚠️发送二维码失败，无法登录")
 
             # 2. 从二维码登录获取 GameToken
             qrcode_query_times = round(
@@ -99,11 +93,6 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                     break
                 elif login_status.qrcode_expired:
                     await get_cookie.finish("⚠️二维码已过期，登录失败")
-                elif login_status.network_error:
-                    # 网络超时不终止，继续轮询
-                    logger.warning("query_game_token_qrcode 网络超时，继续轮询...")
-                    await asyncio.sleep(plugin_config.preference.qrcode_query_interval)
-                    continue
                 elif not login_status:
                     await asyncio.sleep(plugin_config.preference.qrcode_query_interval)
                     continue
@@ -155,10 +144,6 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                                 logger.success(
                                     f"{plugin_config.preference.log_head}米游社账户 {bbs_uid} 绑定成功")
                                 await get_cookie.finish(f"🎉米游社账户 {bbs_uid} 绑定成功")
-                            else:
-                                logger.warning(f"用户 {bbs_uid} 获取 cookie_token 失败")
-                                await get_cookie.finish(
-                                    f"⚠️米游社账户 {bbs_uid} 扫码成功，但获取 cookie_token 失败，请稍后重试")
                         else:
                             # 6.2. 通过 GameToken 获取 cookie_token
                             login_status, cookies = await get_cookie_token_by_game_token(bbs_uid, game_token)
@@ -166,16 +151,6 @@ async def handle_first_receive(event: Union[GeneralMessageEvent]):
                                 logger.success(f"用户 {bbs_uid} 成功获取 cookie_token: {cookies.cookie_token}")
                                 account.cookies.update(cookies)
                                 PluginDataManager.write_plugin_data()
-                                logger.success(
-                                    f"{plugin_config.preference.log_head}米游社账户 {bbs_uid} 绑定成功")
-                                await get_cookie.finish(f"🎉米游社账户 {bbs_uid} 绑定成功")
-                            else:
-                                await get_cookie.finish(
-                                    f"⚠️米游社账户 {bbs_uid} 扫码成功，但获取 cookie_token 失败，请稍后重试")
-                    else:
-                        logger.warning(f"用户 {bbs_uid} 获取 stoken_v2 失败")
-                        await get_cookie.finish(
-                            f"⚠️米游社账户 {bbs_uid} 扫码成功，但获取 stoken 失败，请稍后重试")
             else:
                 await get_cookie.finish("⚠️获取二维码扫描状态超时，请尝试重新登录")
 

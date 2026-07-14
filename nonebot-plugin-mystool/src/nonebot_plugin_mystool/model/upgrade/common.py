@@ -1,8 +1,7 @@
 from typing import Union, Optional, Dict, TYPE_CHECKING
 
 from nonebot.log import logger
-from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
+from pydantic.v1 import BaseSettings
 
 from ..._version import __version__
 from ...model.common import data_path
@@ -34,7 +33,8 @@ class PluginDataV1(BaseSettings):
     users: Dict[str, UserData] = {}
     '''所有用户数据'''
 
-    model_config = ConfigDict()
+    class Config:
+        json_encoders = UserAccount.Config.json_encoders
 
 
 def upgrade_plugin_data():
@@ -58,11 +58,9 @@ def upgrade_plugin_data():
         logger.success("成功提取V1旧版插件数据文件中的 PluginData")
 
         plugin_env_text = ""
-        env_prefix = plugin_env.model_config.get("env_prefix", "mystool_")
-        env_file = plugin_env.model_config.get("env_file", ".env")
         plugin_env_text += "\n".join(
             map(
-                lambda x: f"{env_prefix.upper()}"
+                lambda x: f"{plugin_env.Config.env_prefix.upper()}"
                           "SALT_CONFIG"
                           f"__{x}"
                           f"={plugin_env.salt_config.__getattribute__(x)}",
@@ -72,7 +70,7 @@ def upgrade_plugin_data():
         plugin_env_text += "\n"
         plugin_env_text += "\n".join(
             map(
-                lambda x: f"{env_prefix.upper()}"
+                lambda x: f"{plugin_env.Config.env_prefix.upper()}"
                           "DEVICE_CONFIG"
                           f"__{x}"
                           f"={plugin_env.device_config.__getattribute__(x)}",
@@ -80,9 +78,9 @@ def upgrade_plugin_data():
             )
         )
         logger.warning(
-            f"PluginEnv 会从 nonebot 项目目录下读取 {env_file} 文件，"
+            f"PluginEnv 会从 nonebot 项目目录下读取 {plugin_env.Config.env_file} 文件，"
             "为了防止影响到其他配置，转换后的环境变量将直接输出，"
-            f"如果需要请手动复制并粘贴至 {env_file} 文件\n{plugin_env_text}"
+            f"如果需要请手动复制并粘贴至 {plugin_env.Config.env_file} 文件\n{plugin_env_text}"
         )
 
         # 备份V2配置文件
@@ -95,7 +93,7 @@ def upgrade_plugin_data():
         write_success = True
 
         try:
-            str_data = plugin_config_v2.model_dump_json(indent=4)
+            str_data = plugin_config_v2.json(indent=4)
             with open(plugin_config_path, "w", encoding="utf-8") as f:
                 f.write(str_data)
         except (AttributeError, TypeError, ValueError, PermissionError):
@@ -103,7 +101,7 @@ def upgrade_plugin_data():
             write_success = False
 
         try:
-            str_data = plugin_data_v2.model_dump_json(indent=4)
+            str_data = plugin_data_v2.json(indent=4)
             with open(plugin_data_path, "w", encoding="utf-8") as f:
                 f.write(str_data)
         except (AttributeError, TypeError, ValueError, PermissionError):
