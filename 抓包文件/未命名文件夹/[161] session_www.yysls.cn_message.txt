@@ -1,0 +1,37 @@
+GET /m/mini/20240406173153/data/sign/color-3.png?1 h2
+host: www.yysls.cn
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769
+accept: image/wxpic,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8
+sec-fetch-site: cross-site
+sec-fetch-mode: no-cors
+sec-fetch-dest: image
+referer: https://servicewechat.com/
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+if-none-match: "5326-6559c2567fbb4"
+if-modified-since: Thu, 02 Jul 2026 07:56:31 GMT
+priority: u=1, i
+
+
+
+h2 304
+server: Tengine
+ntes-trace-id: c2e38b747f759986:c2e38b747f759986:0:0
+date: Wed, 15 Jul 2026 01:25:00 GMT
+cache-control: max-age=1800
+x-trace-id: f54c7dae0af316cf613ed6f1b758ef81
+strict-transport-security: max-age=31536000
+expires: Wed, 15 Jul 2026 01:55:00 GMT
+accept-ranges: bytes
+via: cache15.l2cn9466[20,20,304-0,H], cache26.l2cn9466[22,0], cache28.cn7420[0,0,304-0,H], cache28.cn7420[7,0]
+etag: "5326-6559c2567fbb4"
+last-modified: Thu, 02 Jul 2026 07:56:31 GMT
+age: 1518
+ali-swift-global-savetime: 1784078700
+x-cache: HIT TCP_IMS_HIT dirn:-2:-2
+x-swift-savetime: Wed, 15 Jul 2026 01:25:00 GMT
+x-swift-cachetime: 1800
+x-frame-options: SAMEORIGIN
+timing-allow-origin: *
+eagleid: 1bde15a717840802185981291e
+

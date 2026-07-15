@@ -1,0 +1,25 @@
+GET /mp/jsmonitor?idkey=559631_18_1;559631_18_1&r=0.48276830818713545 h2
+host: mp.weixin.qq.com
+sec-ch-ua-platform: "Windows"
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 NetType/WIFI MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769
+sec-ch-ua: "Not A(Brand";v="8", "Chromium";v="132"
+sec-ch-ua-mobile: ?0
+accept: image/wxpic,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8
+sec-fetch-site: same-site
+sec-fetch-mode: no-cors
+sec-fetch-dest: image
+referer: https://wxa.wxs.qq.com/
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+priority: i
+
+
+
+h2 200
+content-type: application/json; charset=UTF-8
+cache-control: no-cache, must-revalidate
+retkey: 14
+logicret: 0
+strict-transport-security: max-age=0
+
+{"ret":0,"errmsg":"ok","cookie_count":0,"base_resp":{"ret":0,"errmsg":"ok","cookie_count":0,"sessionid":"svr_654859ea4ee"},"sessionid":"svr_654859ea4ee"}

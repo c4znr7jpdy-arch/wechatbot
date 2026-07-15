@@ -1,0 +1,28 @@
+GET /record_devilfish?desc=%E7%82%B9%E5%87%BB%E9%87%91%E5%88%9A%E5%8C%BA%E7%AD%BE%E5%88%B0&monitor=click_home_jgq_sign&fake_user_id=oup4b5L5q7QTRr43MVqxrbf5clO4&product=wx3f78b6f96e5992f4.wx&activity=pages%2Fhome%2Fhome&query=&extra=&ginfo=gid%3D0082449592%26%26%26lv%3D100%26%26%26maxZy%3D48888%26%26%26kfts%3D20772%26%26%26qhts%3D14654%26%26%26hxts%3D13792%26%26%26gt%3D8000213%26%26%26new%3D0%26%26%26ww_con%3D261%26%26%26ww_bas%3D386.584%26%26%26ww_cri%3D512.168%26%26%26ww_agi%3D261%26%26%26ww_str%3D693.3679999999999%26%26%26wx_z%3D20601%26%26%26wx_f%3D10302&last_modify=1784080218&system=buildin_devilfish h2
+host: bee.tc.netease.com
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769
+xweb_xhr: 1
+content-type: application/json
+accept: */*
+sec-fetch-site: cross-site
+sec-fetch-mode: cors
+sec-fetch-dest: empty
+referer: https://servicewechat.com/wx3f78b6f96e5992f4/413/page-frame.html
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+priority: u=1, i
+
+
+
+h2 200
+server: nginx
+date: Wed, 15 Jul 2026 01:50:18 GMT
+content-type: text/plain;charset=UTF-8
+content-length: 7
+access-control-allow-credentials: true
+access-control-allow-methods: *
+access-control-max-age: 3600
+x-trace-id: adaceb1cdf1e1daed43dbec764ace0c5
+ntes-trace-id: 57153459c5c4357e:57153459c5c4357e:0:1
+
+SUCCESS
