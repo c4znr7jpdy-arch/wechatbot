@@ -1,0 +1,36 @@
+POST /SdkReport h2
+host: report-online.sh.wxgateway.com
+content-length: 2012
+x-wxmesh-cmd: 3
+x-wx-wxareportob-token: 105_ZW4F5KHriJcDeA61d2PnK5APAqjPyMAJNjaCGfxF5rdcy2fvtumnxwnLme2co398N_YaXcnxkXgNzr1xfKyFFi8nOCIS-66FSnbkvdpgWKnJDvG8iuRWUDjl4I1ZCfTCTxn-XpQ0Tr_u5fWX4At98zFyPlXVeSRIeNtS62w6N_l2AsLrMOhTUqVFFYqwNFrthzuQ9o8eNch7AjKwV5pyQa6RCob1DvHYmN88VbrnVFT3vFnrPJKAiImAgFUTCQ1ATXJAfKGv9Ri0qBysvJOp_yOnk_Wb_BfpFvRMK9UHYYooev9EOB1-_RGQJVi1yXQt5JBy3buqy6fwOWmy
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769
+xweb_xhr: 1
+content-type: application/json
+accept: */*
+sec-fetch-site: cross-site
+sec-fetch-mode: cors
+sec-fetch-dest: empty
+referer: https://servicewechat.com/wx3f78b6f96e5992f4/413/page-frame.html
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+priority: u=1, i
+
+{"request_body":{"body":"eyJiYXNlX3JlcXVlc3QiOnsiRGV2aWNlIjoxNSwiT3NOYW1lIjoiV2luZG93cyBVbmtub3duIHg2NCIsIkRldmljZU1vZGVsIjoibWljcm9zb2Z0IiwiRGV2aWNlQnJhbmQiOiJtaWNyb3NvZnQiLCJTZXNzaW9uaWQiOiJoYXNoJTNEMjM2Njg5ODU4MCUyNnRzJTNEMTc4NDA4NTk4NTM1MiUyNmhvc3QlM0R3eGQ3ZjAwM2E5YTI2NzkwNjElMjZ2ZXJzaW9uJTNEMTk3NjklMjZkZXZpY2UlM0QzNyIsIkxhbmd1YWdlVmVyc2lvbiI6InpoX0NOIiwiQXBwSWQiOiJ3eDNmNzhiNmY5NmU1OTkyZjQiLCJBcHBWZXJzaW9uIjo0MTMsIkxpYlZlcnNpb24iOiIzLjE3LjAiLCJBcHBTdGF0ZSI6MSwiQXBwVHlwZSI6MTAwMCwiT3NWZXJzaW9uIjoiV2luZG93cyBVbmtub3duIHg2NCIsIlJlZ0NvdW50cnkiOiIifSwiYnVzaW5lc3NfaWQiOjE5LCJpdGVtX2RhdGFfbGlzdCI6W3siaXRlbSI6eyJpdGVtX3R5cGUiOjIsIml0ZW1faWQiOiJ2aXNpdF93ZWNoYXRfYXBwIiwiY3VycmVudF9wYXRoIjoie1wicGF0aFwiOlwicGFnZXMvd2Vidmlldy9hY3RpdmUvcG9pbnRzTWFsbC9pbmRleC5odG1sP21vbml0b3I9XCJ9In0sImV2ZW50X2lkIjoicmVwb3J0X29ubHkiLCJldmVudF90aW1lIjoxNzg0MDk3NjYxNTYxLCJkYXRhX2pzb24iOiJ7XCJldmVudF9pZFwiOjIsXCJzY2VuZVwiOjEyNTYsXCJzY2VuZV9ub3RlXCI6XCJcIixcInBhZ2VwYXRoXCI6XCJwYWdlcyUyRndlYnZpZXclMkZhY3RpdmUlMkZwb2ludHNNYWxsJTJGaW5kZXguaHRtbFwiLFwibmV0d29ya3R5cGVcIjpcInVua25vd25cIixcImNvc3R0aW1lXCI6MCxcInN0YXl0aW1lXCI6MTA1MDQsXCJyZWZlcnBhZ2VwYXRoXCI6XCJcIixcInRhcmdldEFjdGlvblwiOjAsXCJ0YXJnZXRQYWdlUGF0aFwiOlwiXCIsXCJjbGlja1RpbWVzdGFtcFwiOjE3ODQwOTc2NTEwNTMsXCJwcmVzY2VuZV9ub3RlXCI6XCJcIixcImlzZW50cmFuY2VcIjowLFwicXVlcnlcIjpcIm1vbml0b3IlM0RjbGljay1teS1qZnNjXCIsXCJwYWdldHlwZVwiOjIsXCJhbmNob3JUYXJnZXRUZXh0XCI6XCJcIixcImFuY2hvclJlbGF0ZWRUZXh0XCI6MCxcImNsaWNrVGltZVwiOjE3ODQwOTc2NTEwNTMsXCJhbmNob3JUYXJnZXRSZWxhdGVkVGV4dFwiOlwiXCIsXCJvcmllbnRhdGlvbkNoYW5nZUNvdW50XCI6MCxcInN0YXJ0Q29zdFRpbWVcIjowLFwic3RhcnRUeXBlXCI6MCxcInN0YXl0aW1lRnVuY3BhZ2VTdGFydFwiOjAsXCJob3N0QXBwSWRcIjpcIlwiLFwic2hvcnRMaW5rXCI6XCJcIixcIm1vZGVcIjowLFwiZGlzcGxheU1vZGVcIjpcIlwiLFwiZm9jdXNUaW1lXCI6MCxcIm5vdE1pbmltaXplZFRpbWVcIjowLFwiaXNMYXB0b3BcIjowLFwiU1NJREhhc2hcIjpcIlwiLFwiQlNTSURIYXNoXCI6XCJcIixcInF1ZXJ5TGVuZ3RoXCI6MjF9IiwidXVpZCI6IjE3ODQwOTc2NjE1NjFfcWc1M3R0c2oifV0sInZlcnNpb24iOiIxLjAiLCJyZXBvcnRfdGltZSI6MTc4NDA5NzY2MTU2MSwic3VibWl0X3R5cGUiOjN9"}}
+
+h2 200
+date: Wed, 15 Jul 2026 06:41:01 GMT
+content-type: application/json
+content-length: 2
+alt-svc: h3=":443"; ma=2592000, h3-29=":443"; ma=2592000, h3-27=":443"; ma=2592000, h3-Q050=":443"; ma=2592000, h3-Q046=":443"; ma=2592000, h3-Q043=":443"; ma=2592000, h3-Q039=":443"; ma=2592000, quic=":443"; ma=2592000; v="39,43,46"
+x-svrkit-cmd: 1
+x-svrkit-engine: Summer2.0
+x-svrkit-ossid: 106314
+x-svrkit-result: 0
+x-wx-fj: 001,018,0000001024
+x-envoy-upstream-service-time: 15
+x-wx-mesh-upstream-service-time: 0,0
+x-wx-envoy-service-time: 16
+x-wx-server-timing: 1784097661961,1784097661977
+server: envoy
+
+{}

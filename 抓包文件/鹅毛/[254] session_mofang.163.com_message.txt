@@ -1,0 +1,35 @@
+GET /web/api/at/3NSsCV/activity/credit?activityId=3NSsCV&componentId=LdKrfp6 h2
+host: mofang.163.com
+mofang-client-info: eyJkZXZpY2VfbW9kZWwiOiJXZUNoYXQgNy4wLjIwLjE3ODEjQmxpbmsgMTMyLjAuMC4wI1dpbmRvd3MgMTAjdW5kZWZpbmVkI2FtZDY0IiwiZGV2aWNlX2hlaWdodCI6MTQ0MCwiZGV2aWNlX3dpZHRoIjoyMzA0LCJvc19uYW1lIjoiV2luZG93cyIsIm9zX3ZlciI6IjEwIiwibmV0d29yayI6IndpZmkiLCJlbmNvZGVkX2FjdF9pZCI6IjNOU3NDViIsIm9yaWdpbiI6IldlQ2hhdCIsImZyb21fcGFnZV91cmwiOiJodHRwczovL21vZmFuZy4xNjMuY29tL2FjdGl2aXR5LzNOU3NDVi9MQ0VKRTJYIn0=
+block_nonce: qx9y61wc1784085998810ew5zcx7o
+block-token2: MTc4NDA4NTk5ODgxMCxVQU14U2E2SUxDNzVTVlc4czJqSzA0VFVlTWFTbk81MTRnc0pad1JtQStJPQ==
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769 miniProgram/wx3f78b6f96e5992f4
+content-type: application/json
+block_timestamp: 1784085998810
+block_signature: 4b990be2d091210b922ae53fbb200a5fc5b71a2ff4c086e95224926d261f6aa0
+accept: */*
+sec-fetch-site: same-origin
+sec-fetch-mode: cors
+sec-fetch-dest: empty
+referer: https://mofang.163.com/activity/3NSsCV/LCEJE2X
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+cookie: BLOCK_S=920A9B2C015044198158D0D34D20EE80
+cookie: mofang_api_login_a=a28404276cd249c1b2679e44ff056e89
+cookie: device_flag=XQK8zxBcPXPVdNtugsFou8TWxJM9p1KxoYX5CAtlg8AQegcHsByUkI4YIfxRSNjk
+priority: u=1, i
+
+
+
+h2 200
+server: nginx
+date: Wed, 15 Jul 2026 03:26:41 GMT
+content-type: application/json
+content-length: 91
+block-trace-id: 1784086001866472c
+vary: Origin
+vary: Access-Control-Request-Method
+vary: Access-Control-Request-Headers
+ntes-trace-id: b1f545688715261c:b1f545688715261c:0:0
+
+{"data":{"activityId":"3NSsCV","componentId":"LdKrfp6","amount":260},"code":200,"msg":"OK"}

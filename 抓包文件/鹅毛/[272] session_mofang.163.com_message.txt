@@ -1,0 +1,40 @@
+POST /web/api/at/3NSsCV/activity/data-source/execute h2
+host: mofang.163.com
+content-length: 84
+mofang-client-info: eyJkZXZpY2VfbW9kZWwiOiJXZUNoYXQgNy4wLjIwLjE3ODEjQmxpbmsgMTMyLjAuMC4wI1dpbmRvd3MgMTAjdW5kZWZpbmVkI2FtZDY0IiwiZGV2aWNlX2hlaWdodCI6MTQ0MCwiZGV2aWNlX3dpZHRoIjoyMzA0LCJvc19uYW1lIjoiV2luZG93cyIsIm9zX3ZlciI6IjEwIiwibmV0d29yayI6IndpZmkiLCJlbmNvZGVkX2FjdF9pZCI6IjNOU3NDViIsIm9yaWdpbiI6IldlQ2hhdCIsImZyb21fcGFnZV91cmwiOiJodHRwczovL21vZmFuZy4xNjMuY29tL2FjdGl2aXR5LzNOU3NDVi9MQ0VKRTJYIn0=
+block_nonce: our75bgf1784085998817kxu08n5i
+block-token2: MTc4NDA4NTk5ODgxNyxVQU14U2E2SUxDNzVTVlc4czJqSzA0VFVlTWFTbk81MTRnc0pad1JtQStJPQ==
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) NetType/WIFI MiniProgramEnv/Windows WindowsWechat/WMPF WindowsWechat(0x63090a13) UnifiedPCWindowsWechat(0xf2541211) XWEB/19769 miniProgram/wx3f78b6f96e5992f4
+content-type: application/json
+block_timestamp: 1784085998817
+block_signature: 7144bbba54326f1b5d0f9fab2ed55b45c0dad2f67e9fc9a00c8a605bc95ab7d8
+accept: */*
+origin: https://mofang.163.com
+sec-fetch-site: same-origin
+sec-fetch-mode: cors
+sec-fetch-dest: empty
+referer: https://mofang.163.com/activity/3NSsCV/LCEJE2X
+accept-encoding: gzip, deflate, br
+accept-language: zh-CN,zh;q=0.9
+cookie: BLOCK_S=920A9B2C015044198158D0D34D20EE80
+cookie: mofang_api_login_a=a28404276cd249c1b2679e44ff056e89
+cookie: device_flag=XQK8zxBcPXPVdNtugsFou8TWxJM9p1KxoYX5CAtlg8AQegcHsByUkI4YIfxRSNjk
+priority: u=1, i
+
+{"activityId":"3NSsCV","dataSourceId":"LduWU3W","params":{"customDrawPoolId":11750}}
+
+h2 200
+server: nginx
+date: Wed, 15 Jul 2026 03:26:42 GMT
+content-type: application/json
+content-length: 42
+block-trace-id: 178408600208042b6
+access-control-expose-headers: Block-Trace-Id
+access-control-allow-origin: https://mofang.163.com
+vary: Origin
+vary: Access-Control-Request-Method
+vary: Access-Control-Request-Headers
+access-control-allow-credentials: true
+ntes-trace-id: 9d816244e757f336:9d816244e757f336:0:0
+
+{"data":{"stock":0},"code":200,"msg":"OK"}
