@@ -5,6 +5,15 @@ __pycache__/
 *.db
 venv/
 data/
+# Keep this source plugin visible while all other AstrBot runtime data stays ignored.
+!data/
+data/*
+!data/plugins/
+data/plugins/*
+!data/plugins/jiang_tide/
+!data/plugins/jiang_tide/**
+!data/plugins/jiang_repeater/
+!data/plugins/jiang_repeater/**
 *.dll
 
 # IDE / AI tools

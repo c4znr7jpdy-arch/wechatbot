@@ -46,6 +46,34 @@ INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 SHARED_MEM_SIZE = 33  # 明确共享内存大小为33字节
 
 
+def _quoted_message_mentions_bot(
+    raw_msg: str,
+    user_text: str,
+    bot_wxid: str,
+    bot_nick: str,
+) -> bool:
+    """只判断引用消息的“当前输入”是否 @ 了机器人。
+
+    11061 的 raw_msg 同时包含当前消息和 <refermsg> 被引用消息。
+    被引用内容里的 wxid / @昵称不能用来唤醒机器人。
+    """
+    current_raw_msg = re.sub(
+        r"<refermsg\b[^>]*>.*?</refermsg>",
+        "",
+        raw_msg or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    current_raw_msg = unescape(current_raw_msg)
+
+    if bot_wxid and bot_wxid in current_raw_msg:
+        return True
+
+    if not bot_nick:
+        return False
+    mention_pattern = rf"@[\s\u2005]*{re.escape(bot_nick)}(?![\w\u4e00-\u9fff])"
+    return re.search(mention_pattern, user_text or "") is not None
+
+
 # ============================ AstrBot WebSocket Client ============================
 
 class AstrBotWsClient:
@@ -2467,14 +2495,17 @@ class WeChatServiceHandler:
             is_group = bool(room_wxid)
             chat_id = room_wxid if is_group else from_wxid
 
-            # 群聊中检测是否 @了机器人（11061 无 at_user_list，需从 raw_msg 和 user_text 判断）
+            # 11061 的 raw_msg 会携带 <refermsg>。只检查当前消息，
+            # 避免“引用一条曾 @ 机器人的旧消息”误唤醒 AstrBot。
             mentioned_bot = False
             if is_group and bot_wxid:
-                if bot_wxid in raw_msg:
-                    mentioned_bot = True
                 bot_nick = getattr(self.service, 'bot_nickname', '')
-                if bot_nick and bot_nick in user_text:
-                    mentioned_bot = True
+                mentioned_bot = _quoted_message_mentions_bot(
+                    raw_msg,
+                    user_text,
+                    bot_wxid,
+                    bot_nick,
+                )
 
             if not astrbot_ws or not astrbot_ws.is_connected():
                 logger.warning("AstrBot 未连接，引用消息未转发")

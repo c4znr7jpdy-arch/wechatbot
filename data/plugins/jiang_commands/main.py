@@ -6,6 +6,7 @@ import sys
 import os
 import re
 import logging
+import importlib
 import tempfile
 import time
 from pathlib import Path
@@ -65,6 +66,11 @@ if _PLUGINS_DIR not in sys.path:
 import _nonebot_stubs
 _nonebot_stubs.setup()
 
+try:
+    from jiang_capability_router.state import record_action as _record_action
+except Exception:
+    _record_action = None
+
 # 将 ai_plugin 父目录加入 sys.path，复用现有模块
 _AI_PLUGIN_PARENT = str(Path(__file__).resolve().parent.parent.parent.parent / "ai_plugin")
 if _AI_PLUGIN_PARENT not in sys.path:
@@ -78,6 +84,9 @@ import ai_plugin.oilprice as _oilprice_mod
 import ai_plugin.bilibili_dynamic as _bili_mod
 import ai_plugin.help_card as _help_mod
 
+# 共享模块不在本插件的热更新清理范围内；油价模块无状态，可安全刷新。
+_oilprice_mod = importlib.reload(_oilprice_mod)
+
 fetch_hot_news = _news_mod.fetch_hot_news
 format_news = _news_mod.format_news
 fetch_weather = _weather_mod.fetch_weather
@@ -89,6 +98,26 @@ fetch_oilprice = _oilprice_mod.fetch_oilprice
 format_oilprice = _oilprice_mod.format_oilprice
 fetch_dynamics = _bili_mod.fetch_dynamics
 generate_help_card = _help_mod.generate_help_card
+
+
+def _record_event_action(
+    event: AstrMessageEvent,
+    capability_id: str,
+    display_name: str,
+    details: dict | None = None,
+) -> None:
+    if not _record_action:
+        return
+    try:
+        _record_action(
+            event.unified_msg_origin,
+            capability_id,
+            display_name,
+            "command",
+            details=details,
+        )
+    except Exception as exc:
+        logger.warning(f"记录最近能力动作失败: {exc}")
 
 # 预生成帮助卡片路径
 _HELP_IMG = str(Path(__file__).parent / "help_card.png")
@@ -172,6 +201,7 @@ class Main(star.Star):
         try:
             items = await fetch_hot_news(20)
             msg = format_news(items)
+            _record_event_action(event, "info.news", "热点新闻", {"count": 20})
             yield event.plain_result(msg)
         except Exception as e:
             logger.exception(f"/新闻 失败: {e}")
@@ -201,6 +231,12 @@ class Main(star.Star):
                 # alapi 失败，降级到纯文本
                 data = await fetch_weather(place)
                 msg = format_weather(data)
+                _record_event_action(
+                    event,
+                    "info.weather",
+                    "天气预报",
+                    {"city": place},
+                )
                 yield event.plain_result(msg)
                 return
             apihz_data = None
@@ -209,6 +245,12 @@ class Main(star.Star):
             except Exception:
                 pass
             img_path = await render_weather_image(alapi_data, apihz_data)
+            _record_event_action(
+                event,
+                "info.weather",
+                "天气预报",
+                {"city": place},
+            )
             yield event.image_result(img_path)
         except Exception as e:
             logger.exception(f"/{place}天气 失败: {e}")
@@ -221,6 +263,7 @@ class Main(star.Star):
         try:
             games = await fetch_epic_free()
             msg = format_epic_free(games)
+            _record_event_action(event, "info.epic", "Epic 喜加一")
             yield event.plain_result(msg)
         except Exception as e:
             logger.exception(f"/epic 失败: {e}")
@@ -232,6 +275,7 @@ class Main(star.Star):
         """KFC 疯狂星期四文案"""
         try:
             text = await fetch_kfc_text()
+            _record_event_action(event, "content.kfc", "疯狂星期四文案")
             yield event.plain_result(text)
         except Exception as e:
             logger.exception(f"/kfc 失败: {e}")
@@ -254,6 +298,12 @@ class Main(star.Star):
         try:
             data = await fetch_oilprice(province)
             msg = format_oilprice(data)
+            _record_event_action(
+                event,
+                "info.oilprice",
+                "今日油价",
+                {"province": province},
+            )
             yield event.plain_result(msg)
         except Exception as e:
             logger.exception(f"/油价 失败: {e}")
@@ -266,6 +316,12 @@ class Main(star.Star):
         try:
             items = await fetch_dynamics("1567141152", count=3)
             if not items:
+                _record_event_action(
+                    event,
+                    "info.yanyun_dynamic",
+                    "燕云十六声动态",
+                    {"count": 3},
+                )
                 yield event.plain_result("暂无燕云动态")
                 return
             lines = ["燕云十六声最新动态："]
@@ -277,6 +333,12 @@ class Main(star.Star):
                     lines.append(f"{i}. {title}")
                 if author:
                     lines.append(f"   —— {author}")
+            _record_event_action(
+                event,
+                "info.yanyun_dynamic",
+                "燕云十六声动态",
+                {"count": 3},
+            )
             yield event.plain_result("\n".join(lines))
         except Exception as e:
             logger.exception(f"/燕云 失败: {e}")

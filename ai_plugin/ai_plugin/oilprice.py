@@ -35,10 +35,25 @@ def normalize_province(text: str) -> str:
 async def fetch_oilprice(province: str) -> dict:
     """获取指定省份的油价信息"""
     province = normalize_province(province)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(API_URL, params={"type": "get", "province": province})
-        resp.raise_for_status()
-        data = resp.json()
+    for attempt in range(2):
+        try:
+            # 这些公开 API 应直接连接。禁用环境代理，避免继承启动终端中
+            # 已失效的 127.0.0.1 代理；只读 GET 发生传输错误时安全重试一次。
+            async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                resp = await client.get(
+                    API_URL,
+                    params={"type": "get", "province": province},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            break
+        except httpx.TransportError as exc:
+            if attempt == 1:
+                raise
+            logger.warning(
+                "[OILPRICE] 请求失败，正在直连重试一次: %s",
+                type(exc).__name__,
+            )
     if data.get("code") != 200:
         raise RuntimeError(data.get("msg", "查询失败"))
     p = data.get("data", {}).get("province")
