@@ -26,6 +26,17 @@ logger = logging.getLogger("jiang_commands")
 
 _WEATHER_PATTERN = re.compile(r"^\s*(.+?)天气\s*$")
 _OILPRICE_PATTERN = re.compile(r"^\s*油价\s*(.+?)\s*$")
+_RANDOM_IMAGE_URLS = (
+    "https://boudoir.ortlinde.com/random",
+    "https://acg.yaohud.cn/dm/adaptive.php",
+)
+_RANDOM_IMAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/137.0.0.0 Safari/537.36"
+    )
+}
 
 
 def _strip_system_identity_prefix(text: str) -> str:
@@ -35,26 +46,74 @@ def _strip_system_identity_prefix(text: str) -> str:
     return cleaned
 
 
-def _fetch_random_image(proxies: dict[str, str], attempts: int = 3, timeout: int = 30):
+def _random_image_proxy_override() -> dict[str, str] | None:
+    """Return the plugin-specific proxy override, if one was configured."""
+    proxy_url = os.getenv("JIANG_RANDOM_IMAGE_PROXY", "").strip()
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _is_valid_random_image_response(response) -> bool:
+    if response is None:
+        return False
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    return (
+        response.status_code == 200
+        and content_type.startswith("image/")
+        and len(response.content) > 1000
+    )
+
+
+def _fetch_random_image(
+    proxies: dict[str, str] | None = None,
+    attempts: int = 2,
+    timeout: int = 15,
+):
     import requests as _req
 
     last_response = None
-    for attempt in range(attempts):
-        resp = _req.get(
-            "https://xrw.christin3.com/api/random-photo",
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/137.0.0.0 Safari/537.36"
+    for attempt in range(max(1, attempts)):
+        for url in _RANDOM_IMAGE_URLS:
+            detected_proxies = proxies or _req.utils.get_environ_proxies(url)
+            routes = []
+            if detected_proxies:
+                routes.append(("proxy", True, proxies))
+            routes.append(("direct", False, None))
+
+            for route_name, trust_env, route_proxies in routes:
+                session = _req.Session()
+                session.trust_env = trust_env
+                try:
+                    resp = session.get(
+                        url,
+                        headers=_RANDOM_IMAGE_HEADERS,
+                        proxies=route_proxies,
+                        timeout=timeout,
+                    )
+                except _req.RequestException as exc:
+                    logger.warning(
+                        "随机图片源请求失败: source=%s route=%s error=%s: %s",
+                        url,
+                        route_name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+
+                last_response = resp
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if _is_valid_random_image_response(resp):
+                    return resp
+                logger.warning(
+                    "随机图片源返回无效内容: source=%s route=%s status=%s "
+                    "content_type=%s bytes=%s",
+                    url,
+                    route_name,
+                    resp.status_code,
+                    content_type or "unknown",
+                    len(resp.content),
                 )
-            },
-            proxies=proxies,
-            timeout=timeout,
-        )
-        last_response = resp
-        if resp.status_code == 200 and len(resp.content) > 1000:
-            return resp
         if attempt < attempts - 1:
             time.sleep(2)
     return last_response
@@ -369,10 +428,13 @@ class Main(star.Star):
         if text != "图来":
             return
         event.stop_event()
-        proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
         try:
-            resp = _fetch_random_image(proxies, attempts=3, timeout=30)
-            if resp.status_code == 200 and len(resp.content) > 1000:
+            resp = _fetch_random_image(
+                _random_image_proxy_override(),
+                attempts=2,
+                timeout=15,
+            )
+            if _is_valid_random_image_response(resp):
                 content_type = (resp.headers.get("Content-Type") or "").lower()
                 suffix = ".jpg"
                 if "png" in content_type:

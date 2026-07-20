@@ -8,7 +8,12 @@ import httpx
 from nonebot import logger
 
 from .utils import download_async
-from .image_generator import GRSAIImageGenerator, _save_b64_image, _save_data_uri
+from .image_generator import (
+    GRSAIImageGenerator,
+    _openai_v1_endpoint,
+    _save_b64_image,
+    _save_data_uri,
+)
 
 IMAGE_DIR = Path(__file__).parent.parent / "data" / "edited_images"
 
@@ -16,7 +21,7 @@ IMAGE_DIR = Path(__file__).parent.parent / "data" / "edited_images"
 class ImageEditor:
     """图生图后端（GPT image edit + MiniMax i2i）"""
 
-    def __init__(self, gpt_api_key: str = "", gpt_base_url: str = "http://freeapi.dgbmc.top",
+    def __init__(self, gpt_api_key: str = "", gpt_base_url: str = "https://api.openai.com/v1",
                  gpt_model: str = "gpt-image-2",
                  gpt2_api_key: str = "", gpt2_base_url: str = "https://grsai.dakka.com.cn",
                  gpt2_model: str = "gpt-image-2", gpt2_quality: str = "auto",
@@ -42,11 +47,11 @@ class ImageEditor:
         self.image_dir = IMAGE_DIR
         self.image_dir.mkdir(parents=True, exist_ok=True)
 
-    async def edit(self, image_path: str, prompt: str, model: str = "gpt2",
+    async def edit(self, image_path: str, prompt: str, model: str = "gpt1",
                    n: int = 1, aspect_ratio: str = "1:1") -> list[str]:
-        model = (model or "gpt2").lower().strip()
+        model = (model or "gpt1").lower().strip()
         if model == "gpt":
-            model = "gpt2" if self.gpt2_generator else "gpt1"
+            model = "gpt1"
         if model == "gpt2" and self.gpt2_generator:
             return await self._edit_gpt2(image_path, prompt, n, aspect_ratio)
         if model == "gpt1" and self.gpt_api_key:
@@ -61,7 +66,7 @@ class ImageEditor:
                         logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT2: {e}")
                         return await self._edit_gpt2(image_path, prompt, n, aspect_ratio)
                     if self.gpt_api_key:
-                        logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT1: {e}")
+                        logger.warning(f"[IMAGE EDITOR] MiniMax 内容审核拒绝，回退 GPT: {e}")
                         return await self._edit_gpt(image_path, prompt, n, aspect_ratio)
                 raise
         available = []
@@ -90,9 +95,14 @@ class ImageEditor:
         size_map = {"1:1": "1024x1024", "16:9": "1536x1024", "9:16": "1024x1536",
                     "4:3": "1024x768", "3:4": "768x1024", "3:2": "1024x683", "2:3": "683x1024"}
         size = size_map.get(aspect_ratio, "1024x1024")
-        url = f"{self.gpt_base_url}/v1/images/edits"
+        url = _openai_v1_endpoint(self.gpt_base_url, "images/edits")
 
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        # 与文生图保持一致，避免长请求经过系统代理后被提前断开。
+        async with httpx.AsyncClient(
+            timeout=300.0,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
             with open(image_path, "rb") as f:
                 files = {
                     "image": (Path(image_path).name, f, "image/png"),
@@ -189,10 +199,10 @@ def _encode_image_b64(image_path: str) -> str:
 
 
 _editor: ImageEditor | None = None
-_active_editor_model: str = "gpt2"
+_active_editor_model: str = "gpt1"
 
 
-def init_image_editor(gpt_api_key: str = "", gpt_base_url: str = "http://freeapi.dgbmc.top",
+def init_image_editor(gpt_api_key: str = "", gpt_base_url: str = "https://api.openai.com/v1",
                       gpt_model: str = "gpt-image-2",
                       gpt2_api_key: str = "", gpt2_base_url: str = "https://grsai.dakka.com.cn",
                       gpt2_model: str = "gpt-image-2", gpt2_quality: str = "auto",
@@ -206,11 +216,16 @@ def init_image_editor(gpt_api_key: str = "", gpt_base_url: str = "http://freeapi
         minimax_api_key=minimax_api_key, minimax_base_url=minimax_base_url,
         minimax_model=minimax_model,
     )
-    if _active_editor_model == "gpt2" and not _editor.gpt2_generator:
-        if _editor.gpt_api_key:
-            _active_editor_model = "gpt1"
-        elif _editor.minimax_api_key:
-            _active_editor_model = "minimax"
+    available = {
+        "gpt1": bool(_editor.gpt_api_key),
+        "minimax": bool(_editor.minimax_api_key),
+        "gpt2": bool(_editor.gpt2_generator),
+    }
+    if not available.get(_active_editor_model):
+        for preferred in ("gpt1", "minimax", "gpt2"):
+            if available[preferred]:
+                _active_editor_model = preferred
+                break
     logger.info("[IMAGE EDITOR] 图生图编辑器已就绪")
 
 
@@ -227,10 +242,10 @@ def switch_editor_model(name: str) -> str:
     name = name.lower().strip()
     if name in ("mm", "minimax"):
         name = "minimax"
-    elif name in ("gpt", "gpt2", "gpt-image-2", "grs", "grsai"):
-        name = "gpt2"
-    elif name in ("gpt1", "gpt-image", "gptimage", "oldgpt"):
+    elif name in ("gpt", "gpt1", "gpt-image-2", "gpt-image", "gptimage"):
         name = "gpt1"
+    elif name in ("gpt2", "grs", "grsai", "oldgpt"):
+        name = "gpt2"
     else:
         return f"图生图模型名 {name} 不认识，可用: gpt2, gpt1, minimax"
     if _editor is None:

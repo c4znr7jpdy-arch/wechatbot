@@ -21,6 +21,7 @@ IMAGE_DIR = Path(__file__).parent.parent / "data" / "images"
 CLEANUP_HOURS = 2
 
 IMAGE_INTENT_PATTERNS = [
+    r"(?:帮我|给我|请|想要|来|做|生成)?(?<![图文])生图(?:$|[\s，,：:])",
     r"生成.*(?:图片|照片|图像|插画|壁纸|头像|[张个只].*图)",
     r"画.*(?:一张|一个|一幅|个)",
     r"帮我.*(?:画|生成|做|制作).*(?:图片|照片|图|图像|插画)",
@@ -167,10 +168,17 @@ class MiniMaxImageGenerator:
         return paths
 
 
+def _openai_v1_endpoint(base_url: str, path: str) -> str:
+    """拼接 OpenAI 兼容端点，兼容 base URL 是否已包含 /v1。"""
+    base = base_url.rstrip("/")
+    versioned_base = base if base.endswith("/v1") else f"{base}/v1"
+    return f"{versioned_base}/{path.lstrip('/')}"
+
+
 class GPTImageGenerator:
     """GPT-Image (OpenAI 兼容) 后端"""
 
-    def __init__(self, api_key: str, base_url: str = "http://freeapi.dgbmc.top",
+    def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1",
                  model: str = "gpt-image-2", image_dir: Path | None = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -188,10 +196,16 @@ class GPTImageGenerator:
             "size": size,
             "response_format": "url",
         }
-        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
+        # 生图响应耗时较长，继承系统代理容易被本机代理的空闲超时中断。
+        # GPT 图像 API 固定直连；其他下载和后端仍沿用各自的网络配置。
+        async with httpx.AsyncClient(
+            timeout=300.0,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
             request_started = time.monotonic()
             resp = await client.post(
-                f"{self.base_url}/v1/images/generations",
+                _openai_v1_endpoint(self.base_url, "images/generations"),
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                 json=payload,
             )
@@ -407,7 +421,7 @@ def _save_data_uri(data_uri: str, image_dir: Path, index: int = 0) -> str:
 # ---- 全局状态 ----
 
 _generators: dict[str, MiniMaxImageGenerator | GPTImageGenerator | GRSAIImageGenerator] = {}
-_active_model: str = "gpt2"
+_active_model: str = "gpt1"
 
 
 def init_image_generators(
@@ -415,7 +429,7 @@ def init_image_generators(
     minimax_base_url: str = "https://api.minimaxi.com/v1",
     minimax_model: str = "image-01",
     gpt_api_key: str = "",
-    gpt_base_url: str = "http://freeapi.dgbmc.top",
+    gpt_base_url: str = "https://api.openai.com/v1",
     gpt_model: str = "gpt-image-2",
     gpt2_api_key: str = "",
     gpt2_base_url: str = "https://grsai.dakka.com.cn",
@@ -433,23 +447,23 @@ def init_image_generators(
         _generators["gpt1"] = GPTImageGenerator(
             api_key=gpt_api_key, base_url=gpt_base_url, model=gpt_model
         )
-        logger.info("[IMAGE] GPT1 后端已就绪")
+        logger.info("[IMAGE] GPT OpenAI-compatible 后端已就绪")
     if gpt2_api_key:
         _generators["gpt2"] = GRSAIImageGenerator(
             api_key=gpt2_api_key, base_url=gpt2_base_url, model=gpt2_model, quality=gpt2_quality
         )
         logger.info("[IMAGE] GPT2 GRS 后端已就绪")
     if _active_model not in _generators and _generators:
-        for preferred in ("gpt2", "gpt1", "minimax"):
+        for preferred in ("gpt1", "minimax", "gpt2"):
             if preferred in _generators:
                 _active_model = preferred
                 break
     _schedule_cleanup()
 
 
-def get_image_generator():
-    """返回当前激活的图片生成器"""
-    return _generators.get(_active_model)
+def get_image_generator(name: str | None = None):
+    """返回指定图片生成器；未指定时返回当前激活的生成器。"""
+    return _generators.get(name or _active_model)
 
 
 def get_current_image_model() -> str:
@@ -462,10 +476,10 @@ def switch_image_model(name: str) -> str:
     name = name.lower().strip()
     if name in ("mm", "minimax"):
         name = "minimax"
-    elif name in ("gpt", "gpt2", "gpt-image-2", "grs", "grsai"):
-        name = "gpt2"
-    elif name in ("gpt1", "gpt-image", "gptimage", "oldgpt"):
+    elif name in ("gpt", "gpt1", "gpt-image-2", "gpt-image", "gptimage"):
         name = "gpt1"
+    elif name in ("gpt2", "grs", "grsai", "oldgpt"):
+        name = "gpt2"
     if name not in _generators:
         available = ", ".join(_generators.keys()) or "(无)"
         return f"图片模型 {name} 不可用，可用: {available}，当前: {_active_model}"

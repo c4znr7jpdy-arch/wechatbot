@@ -146,9 +146,8 @@ WeChat user IDs are `wxid_xxx` strings. Wrap `int(m["data"]["qq"])` in try-excep
 - Playable music cards are `<appmsg>` messages with `<type>3</type>`, a playable `<dataurl>`, and `<songalbumurl>` for cover art.
 
 ### Image Generation
-- **Dual backend**: MiniMax `image-01` + GPT-Image `gpt-image-2` (via `freeapi.dgbmc.top` proxy, API key in `.env.prod`)
-- **grok-imagine-image-lite** also available on `freeapi.dgbmc.top`, works well (fast, ~10s)
-- **gpt-image-2** often times out on free proxies — use `grok-imagine-image-lite` as fallback
+- **Dual backend**: GPT-Image `gpt-image-2` (via the OpenAI-compatible Sub2API configured in `.env.prod`) + MiniMax `image-01` fallback
+- `GPT_IMAGE_BASE_URL` accepts either an API root ending in `/v1` or an unversioned root; the client normalizes both forms
 - Admin command `#切换图片模型 gpt/minimax` to switch backend at runtime
 - Images auto-cleaned from `data/images/` every 2 hours
 

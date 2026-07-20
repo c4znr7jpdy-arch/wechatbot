@@ -288,7 +288,7 @@ ENV_NAME=prod
 
 # GPT-Image (文生图 + 图生图)
 GPT_IMAGE_API_KEY=sk-xxx
-GPT_IMAGE_BASE_URL=https://freeapi.dgbmc.top
+GPT_IMAGE_BASE_URL=https://sub.xiuxianjyj.xin/v1
 GPT_IMAGE_MODEL=gpt-image-2
 
 # MiniMax (Video + Image 后端，仍被 image_generator / video_generator 使用)
