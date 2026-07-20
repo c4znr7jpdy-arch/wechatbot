@@ -22,6 +22,7 @@ import json as _json
 import re
 import uuid as _uuid
 from html import unescape
+import xml.etree.ElementTree as ET
 
 # 253 读取wx消息
 # 563 向wx发送消息
@@ -1558,12 +1559,33 @@ def _member_display_name(info: dict) -> str:
         return ""
     return info.get("display_name") or info.get("nickname") or info.get("remark") or ""
 
+def _member_avatar(info: dict) -> str:
+    """Return an avatar URL across the field names used by DLL revisions."""
+    if not isinstance(info, dict):
+        return ""
+    for key in (
+        "avatar",
+        "avatar_url",
+        "head_img",
+        "head_img_url",
+        "headimg",
+        "headimgurl",
+        "small_head",
+        "small_head_url",
+        "big_head",
+        "big_head_url",
+    ):
+        value = str(info.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
 def _member_identity(info: dict, fallback: dict | None = None) -> dict:
     fallback = fallback if isinstance(fallback, dict) else {}
     info = info if isinstance(info, dict) else {}
     nickname = str(info.get("nickname") or fallback.get("nickname") or "")
     display_name = str(info.get("display_name") or fallback.get("display_name") or "")
-    avatar = str(info.get("avatar") or fallback.get("avatar") or "")
+    avatar = _member_avatar(info) or _member_avatar(fallback)
     return {
         "nickname": nickname,
         "display_name": display_name,
@@ -1583,7 +1605,9 @@ def _upsert_group_member(room_wxid: str, member: dict) -> None:
     _GROUP_MEMBER_CACHE[room_wxid][wxid] = {
         "nickname": str(member.get("nickname", existing.get("nickname", "")) or ""),
         "display_name": str(member.get("display_name", existing.get("display_name", "")) or ""),
-        "avatar": str(member.get("avatar", existing.get("avatar", "")) or ""),
+        # Full member snapshots in current WeChat builds omit avatar. Keep a
+        # previously resolved URL instead of replacing it with an empty value.
+        "avatar": _member_avatar(member) or _member_avatar(existing),
         "remark": str(member.get("remark", existing.get("remark", "")) or ""),
     }
 
@@ -1615,11 +1639,34 @@ def _cache_group_members(data: dict) -> tuple[str, int]:
     member_list = data.get("member_list", [])
     if not room_wxid or not isinstance(member_list, list):
         return room_wxid, 0
+    previous_members = _GROUP_MEMBER_CACHE.get(room_wxid, {})
+    previous_members = previous_members if isinstance(previous_members, dict) else {}
     _GROUP_MEMBER_CACHE[room_wxid] = {}
     for mem in member_list:
+        wxid = str(mem.get("wxid", "")) if isinstance(mem, dict) else ""
+        if wxid and isinstance(previous_members.get(wxid), dict):
+            _GROUP_MEMBER_CACHE[room_wxid][wxid] = previous_members[wxid]
         _upsert_group_member(room_wxid, mem)
     _save_group_member_cache()
     return room_wxid, len(member_list)
+
+def _has_member_identity(info: dict) -> bool:
+    """Whether a cache entry is strong enough to serve as a change baseline."""
+    if not isinstance(info, dict):
+        return False
+    return bool(str(info.get("display_name", "") or "").strip() or str(info.get("nickname", "") or "").strip())
+
+def _merge_member_update(cached: dict, update: dict) -> dict:
+    """Overlay fields explicitly supplied by a one-member update payload."""
+    merged = dict(cached) if isinstance(cached, dict) else {}
+    update = update if isinstance(update, dict) else {}
+    for key in ("nickname", "display_name", "remark"):
+        if key in update:
+            merged[key] = str(update.get(key, "") or "")
+    avatar = _member_avatar(update)
+    if avatar:
+        merged["avatar"] = avatar
+    return merged
 
 def _load_user_aliases() -> dict:
     global _USER_ALIAS_CACHE
@@ -1820,6 +1867,12 @@ class WeChatServiceHandler:
         self._last_appmsg_raw_path = os.path.join(os.path.dirname(__file__), "data", "appmsg", "last_11061_raw.xml")
         self._last_appmsg_json_path = os.path.join(os.path.dirname(__file__), "data", "appmsg", "last_11061.json")
         self._last_appmsg_by_type = {}
+        self._forward_record_cache_path = os.path.join(
+            os.path.dirname(__file__), "data", "appmsg", "forward_record_cache.json"
+        )
+        self._forward_record_cache = {}
+        self._forward_record_cache_lock = threading.Lock()
+        self._load_forward_record_cache()
         self._filehelper_msgs = []  # 缓存发给文件助手及收到的消息 (最多100条)
 
     def _cache_filehelper_msg(self, sender: str, content: str, direction: str = "in"):
@@ -1944,7 +1997,8 @@ class WeChatServiceHandler:
     ) -> None:
         def worker():
             refreshed = self._refresh_group_members_sync(room_wxid, "group member update card", timeout=2.0)
-            cached_entry = _GROUP_MEMBER_CACHE.get(room_wxid, {}).get(wxid, {}) or fallback_member or {}
+            cached_entry = _GROUP_MEMBER_CACHE.get(room_wxid, {}).get(wxid, {})
+            cached_entry = _merge_member_update(cached_entry, fallback_member or {})
             if not cached_entry:
                 logger.warning(
                     f"昵称修改卡片未发送：未拿到成员信息 room={room_wxid}, wxid={wxid}, refreshed={refreshed}"
@@ -1958,6 +2012,10 @@ class WeChatServiceHandler:
             ):
                 logger.info(f"昵称修改卡片未发送：刷新前后无变化 room={room_wxid}, wxid={wxid}")
                 return
+            cache_update = dict(cached_entry)
+            cache_update["wxid"] = wxid
+            _upsert_group_member(room_wxid, cache_update)
+            _save_group_member_cache()
             if not astrbot_ws or not astrbot_ws.is_connected():
                 return
             event_data = {
@@ -2121,10 +2179,18 @@ class WeChatServiceHandler:
             _save_group_member_cache()
         
         elif message_type == 11200:
-            # 群内成员修改群昵称/资料等轻量通知，收到后刷新 11032 覆盖本地缓存。
+            # 11200 既可能是入群时的全量成员快照，也可能是单成员资料变更。
+            # 先用全量快照建立当前基线，不能把初始化资料补全误报成历史改名。
             room_wxid = self._extract_room_wxid(data)
-            member_wxid = self._extract_member_wxid(data, room_wxid)
             member_list = data.get("member_list")
+            if isinstance(member_list, list) and len(member_list) > 1:
+                cached_room, member_count = _cache_group_members(data)
+                logger.info(
+                    f"[11200] 已建立群成员基线: room={cached_room or room_wxid}, members={member_count}"
+                )
+                return
+
+            member_wxid = self._extract_member_wxid(data, room_wxid)
             fallback_member = (
                 member_list[0]
                 if isinstance(member_list, list) and len(member_list) == 1 and isinstance(member_list[0], dict)
@@ -2134,7 +2200,18 @@ class WeChatServiceHandler:
                 astrbot_ws = get_astrbot_ws_client()
                 bot_wxid = astrbot_ws._bot_wxid if astrbot_ws else ""
                 old_entry = copy.deepcopy(_GROUP_MEMBER_CACHE.get(room_wxid, {}).get(member_wxid, {}))
-                if member_wxid and astrbot_ws and astrbot_ws.is_connected():
+                if member_wxid and not _has_member_identity(old_entry):
+                    # The first single-member payload after joining/reconnecting is
+                    # baseline completion, not an observed transition.
+                    if fallback_member:
+                        _upsert_group_member(room_wxid, fallback_member)
+                        _save_group_member_cache()
+                    self._request_group_member_refresh(room_wxid, "11200 initialize missing member baseline")
+                    logger.info(
+                        f"[11200] 首次成员资料仅建基线，未发修改卡片: "
+                        f"room={room_wxid}, member={member_wxid}"
+                    )
+                elif member_wxid and astrbot_ws and astrbot_ws.is_connected():
                     self._send_group_member_update_notice_after_refresh(
                         astrbot_ws=astrbot_ws,
                         bot_wxid=bot_wxid,
@@ -2388,58 +2465,210 @@ class WeChatServiceHandler:
         chatusr_match = re.search(r"<refermsg>.*?<chatusr>(.*?)</chatusr>", raw_msg, re.DOTALL)
         if chatusr_match:
             result["quote_sender_wxid"] = chatusr_match.group(1).strip()
+        svrid_match = re.search(r"<refermsg>.*?<svrid>(.*?)</svrid>", raw_msg, re.DOTALL)
+        if svrid_match:
+            result["quote_svrid"] = svrid_match.group(1).strip()
         return result
 
-    def _parse_forward_record(self, raw_msg: str) -> str | None:
-        """从 raw_msg XML 中提取转发聊天记录的内容（<recorditem>），返回格式化文本"""
+    @staticmethod
+    def _xml_text(root, path: str) -> str:
+        node = root.find(path) if root is not None else None
+        return (node.text or "").strip() if node is not None else ""
+
+    @staticmethod
+    def _decode_xml_layers(value: str, max_depth: int = 5) -> str:
+        """展开引用消息和 recorditem 中常见的多层 HTML 实体编码。"""
+        decoded = value or ""
+        for _ in range(max_depth):
+            if decoded.lstrip().startswith("<"):
+                try:
+                    ET.fromstring(decoded)
+                    break
+                except ET.ParseError:
+                    pass
+            next_value = unescape(decoded)
+            if next_value == decoded:
+                break
+            decoded = next_value
+        return decoded
+
+    def _record_xml_candidate(self, raw_msg: str) -> tuple[str, str]:
+        """返回真正包含 type=19 recorditem 的 XML 及卡片标题。"""
         if not raw_msg:
+            return "", ""
+        candidates = [raw_msg]
+        try:
+            root = ET.fromstring(raw_msg)
+            refer_content = self._xml_text(root, ".//refermsg/content")
+            if refer_content:
+                candidates.insert(0, refer_content)
+        except ET.ParseError:
+            pass
+
+        for candidate in candidates:
+            decoded = self._decode_xml_layers(candidate)
+            if "<recorditem" not in decoded:
+                continue
+            try:
+                root = ET.fromstring(decoded)
+                appmsg = root.find(".//appmsg")
+                if appmsg is None and root.tag == "appmsg":
+                    appmsg = root
+                if appmsg is None or self._xml_text(appmsg, "type") != "19":
+                    continue
+                recorditem = self._xml_text(appmsg, "recorditem")
+                if recorditem:
+                    return self._decode_xml_layers(recorditem), self._xml_text(appmsg, "title")
+            except ET.ParseError:
+                # 某些 DLL 回调会省略 XML 声明或带不规范字符，后续仍尝试正则取 CDATA。
+                record_match = re.search(r"<recorditem[^>]*>(.*?)</recorditem>", decoded, re.I | re.S)
+                if record_match:
+                    title_match = re.search(r"<title>(.*?)</title>", decoded, re.I | re.S)
+                    title = unescape(title_match.group(1)).strip() if title_match else ""
+                    return self._decode_xml_layers(record_match.group(1)), title
+        return "", ""
+
+    def _parse_forward_record_payload(self, raw_msg: str) -> dict | None:
+        """解析合并转发，返回可读文本及按原顺序排列的图片 CDN 信息。"""
+        record_xml, title = self._record_xml_candidate(raw_msg)
+        if not record_xml:
             return None
-        if "<recorditem>" not in raw_msg:
+        try:
+            record_root = ET.fromstring(record_xml)
+        except ET.ParseError as e:
+            logger.warning(f"[FORWARD] recorditem XML 解析失败: {e}")
             return None
-        title_match = re.search(r"<title>(.*?)</title>", raw_msg, re.DOTALL)
-        title = title_match.group(1).strip() if title_match else ""
+
+        dataitems = record_root.findall(".//dataitem")
         lines = []
-        # 方式1: 解析 <recorditem> -> <dataitems> -> <dataitem>
-        dataitems_match = re.search(r"<dataitems>(.*?)</dataitems>", raw_msg, re.DOTALL)
-        if dataitems_match:
-            items_block = dataitems_match.group(1)
-            for item_match in re.finditer(r"<dataitem[^>]*>(.*?)</dataitem>", items_block, re.DOTALL):
-                block = item_match.group(1)
-                sender_match = re.search(r"<sourcename>(.*?)</sourcename>", block, re.DOTALL)
-                content_match = re.search(r"<srcmsgcontent>(.*?)</srcmsgcontent>", block, re.DOTALL)
-                sender = sender_match.group(1).strip() if sender_match else ""
-                content = content_match.group(1).strip() if content_match else ""
-                if content:
-                    line = f"{sender}: {content}" if sender else content
-                    lines.append(line)
-        # 方式2: 如果 dataitems 为空，尝试从 <desc> 提取摘要
-        if not lines:
-            desc_match = re.search(r"<recorditem>.*?<desc>(.*?)</desc>", raw_msg, re.DOTALL)
-            if desc_match:
-                desc_text = desc_match.group(1).strip()
-                if desc_text:
-                    lines.append(desc_text)
+        images = []
+        image_index = 0
+        type_labels = {
+            "3": "语音", "4": "视频", "5": "链接", "6": "位置",
+            "7": "文件", "8": "名片", "14": "聊天记录",
+        }
+        for item in dataitems:
+            datatype = (item.get("datatype") or self._xml_text(item, "datatype")).strip()
+            sender = self._xml_text(item, "sourcename") or self._xml_text(item, "fromusrname")
+            source_content = self._xml_text(item, "srcmsgcontent")
+            data_desc = self._xml_text(item, "datadesc")
+            source_time = self._xml_text(item, "sourcetime")
+            item_xml = ET.tostring(item, encoding="unicode")
+            decoded_item = item_xml + self._decode_xml_layers(source_content)
+            is_image = datatype == "2" or "<img" in decoded_item.lower()
+
+            if is_image:
+                image_index += 1
+                cdn_info = self._parse_image_cdn_info(decoded_item)
+                cdn_info.update({"index": image_index, "sender": sender})
+                images.append(cdn_info)
+                content = f"[图片{image_index}]"
+            elif datatype in ("", "1"):
+                # 微信 4.x 的完整转发卡片把文本放在 datadesc；旧版本常用 srcmsgcontent。
+                content = self._decode_xml_layers(source_content or data_desc).strip()
+                if content.startswith("<"):
+                    try:
+                        content_root = ET.fromstring(content)
+                        content = "".join(content_root.itertext()).strip()
+                    except ET.ParseError:
+                        pass
+            else:
+                label = type_labels.get(datatype, "消息")
+                data_title = self._xml_text(item, "datatitle") or self._xml_text(item, "title")
+                content = f"[{label}{': ' + data_title if data_title else ''}]"
+
+            if content:
+                prefix = f"[{source_time}] " if source_time else ""
+                lines.append(prefix + (f"{sender}: {content}" if sender else content))
+
+        desc = self._xml_text(record_root, ".//desc")
+        if not lines and desc:
+            lines = [self._decode_xml_layers(desc).strip()]
         if not lines:
             return None
-        header = "【转发聊天记录】"
-        if title:
-            header += f" {title}"
-        return header + "\n" + "\n".join(lines)
+
+        header = "【转发聊天记录】" + (f" {title}" if title else "")
+        formatted = header + "\n" + "\n".join(lines)
+        return {
+            "title": title,
+            "text": formatted,
+            "images": images,
+            "item_count": len(dataitems),
+            "complete": bool(dataitems),
+        }
+
+    def _parse_forward_record(self, raw_msg: str) -> str | None:
+        """兼容旧调用：从 raw_msg XML 中返回格式化后的转发聊天文本。"""
+        payload = self._parse_forward_record_payload(raw_msg)
+        return payload["text"] if payload else None
 
     def _parse_image_cdn_info(self, xml_content: str) -> dict:
         """从引用图片的 XML 中提取 CDN 下载参数（多个尺寸的 file_id）"""
-        xml_content = unescape(xml_content or "")
-        aeskey = re.search(r'aeskey="([^"]*)"', xml_content)
-        thumb = re.search(r'cdnthumburl="([^"]*)"', xml_content)
-        mid = re.search(r'cdnmidimgurl="([^"]*)"', xml_content)
-        big = re.search(r'cdnbigimgurl="([^"]*)"', xml_content)
-        aes = aeskey.group(1) if aeskey else ""
+        xml_content = self._decode_xml_layers(xml_content or "")
+        xml_variants = [xml_content]
+        for _ in range(3):
+            decoded = unescape(xml_variants[-1])
+            if decoded == xml_variants[-1]:
+                break
+            xml_variants.append(decoded)
+
+        def first_value(*names):
+            for name in names:
+                for variant in xml_variants:
+                    attr_match = re.search(
+                        rf'\b{re.escape(name)}\s*=\s*["\']([^"\']*)["\']',
+                        variant,
+                        re.IGNORECASE,
+                    )
+                    if attr_match and attr_match.group(1):
+                        return unescape(attr_match.group(1)).strip()
+                    tag_match = re.search(
+                        rf'<{re.escape(name)}[^>]*>(.*?)</{re.escape(name)}>',
+                        variant,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if tag_match and tag_match.group(1):
+                        return unescape(tag_match.group(1)).strip()
+            return ""
+
+        key_data = first_value("cdndatakey")
+        key_big = first_value("cdnbigimgkey")
+        key_mid = first_value("cdnmidimgkey")
+        key_thumb = first_value("cdnthumbkey")
+        aes = first_value("aeskey") or key_data or key_big or key_mid or key_thumb
         return {
             "aes_key": aes,
-            "file_id_thumb": thumb.group(1) if thumb else "",   # file_type=3
-            "file_id_mid": mid.group(1) if mid else "",           # file_type=2
-            "file_id_big": big.group(1) if big else "",           # file_type=1
+            "file_id_data": first_value("cdndataurl"),   # 转发记录中的原图
+            "key_data": key_data,
+            "file_type_data": first_value("filetype") or "1",
+            "file_id_thumb": first_value("cdnthumburl"),  # 普通引用默认 3，转发记录读取 thumbfiletype
+            "key_thumb": key_thumb,
+            "file_type_thumb": first_value("thumbfiletype") or "3",
+            "file_id_mid": first_value("cdnmidimgurl"),   # file_type=2
+            "key_mid": key_mid,
+            "file_id_big": first_value("cdnbigimgurl"),   # file_type=1
+            "key_big": key_big,
         }
+
+    @staticmethod
+    def _image_download_candidates(image: dict) -> list[tuple[str, str, int]]:
+        """按清晰度和参数匹配度生成 CDN 下载候选，转发记录原图优先。"""
+        default_key = image.get("aes_key", "")
+        try:
+            data_file_type = int(image.get("file_type_data") or 1)
+        except (TypeError, ValueError):
+            data_file_type = 1
+        try:
+            thumb_file_type = int(image.get("file_type_thumb") or 3)
+        except (TypeError, ValueError):
+            thumb_file_type = 3
+        candidates = [
+            (image.get("file_id_data", ""), image.get("key_data", "") or default_key, data_file_type),
+            (image.get("file_id_big", ""), image.get("key_big", "") or default_key, 1),
+            (image.get("file_id_mid", ""), image.get("key_mid", "") or default_key, 2),
+            (image.get("file_id_thumb", ""), image.get("key_thumb", "") or default_key, thumb_file_type),
+        ]
+        return [(file_id, aes_key, file_type) for file_id, aes_key, file_type in candidates if file_id and aes_key]
 
     def _cdn_download_sync(self, file_id: str, aes_key: str, file_type: int = 2) -> str | None:
         """同步 CDN 下载图片，返回本地路径或 None"""
@@ -2467,6 +2696,99 @@ class WeChatServiceHandler:
         finally:
             self._pending_cdn.pop(trace_id, None)
 
+    def _forward_record_images_and_send(self, ctx: dict, payload: dict):
+        """后台下载合并转发中的图片，随后一次性把文字和多图交给 AstrBot。"""
+        try:
+            try:
+                max_images = int(os.environ.get("FORWARD_RECORD_MAX_IMAGES", "8"))
+            except ValueError:
+                max_images = 8
+            max_images = max(1, min(max_images, 20))
+
+            downloaded = []
+            images = payload.get("images", [])
+            for image in images[:max_images]:
+                for file_id, aes_key, file_type in self._image_download_candidates(image):
+                    local_path = self._cdn_download_sync(file_id, aes_key, file_type)
+                    if local_path and os.path.exists(local_path):
+                        downloaded.append((image.get("index", len(downloaded) + 1), local_path))
+                        break
+
+            astrbot_ws = get_astrbot_ws_client()
+            if not astrbot_ws or not astrbot_ws.is_connected():
+                logger.warning("AstrBot 未连接，转发聊天记录多图事件未发送")
+                return
+
+            total_images = len(images)
+            if downloaded:
+                attached_indices = "、".join(str(index) for index, _ in downloaded)
+                vision_note = (
+                    f"[系统说明：已取得聊天记录中的图片 {attached_indices}，"
+                    "图片段按编号附在消息末尾。请结合图片与相邻聊天文字分析。]"
+                )
+                if len(downloaded) < min(total_images, max_images):
+                    vision_note += "\n[其余图片下载失败或已过期，不要猜测其内容。]"
+                if total_images > max_images:
+                    vision_note += f"\n[聊天记录共有 {total_images} 张图片，本次最多读取前 {max_images} 张。]"
+            else:
+                vision_note = "[系统说明：图片 CDN 已过期或下载失败，不要猜测图片内容。]"
+
+            forward_text = payload["text"] + "\n" + vision_note
+            quote_meta = json.dumps({
+                "qt": "forward", "qs": ctx.get("quote_sender", ""),
+                "qsw": ctx.get("quote_sender_wxid", ""), "qtxt": forward_text,
+                "qimgs": [index for index, _ in downloaded],
+            }, ensure_ascii=False)
+            alt_msg = (
+                f"{quote_meta}\n[转发聊天记录:「{forward_text}」]\n"
+                f"{ctx.get('user_text', '')}"
+            )
+            event_text = _with_sender_identity(
+                alt_msg,
+                ctx["from_wxid"],
+                ctx["chat_id"] if ctx["is_group"] else "",
+            )
+
+            message_segs = []
+            if ctx["is_group"] and ctx.get("mentioned_bot"):
+                nick = _lookup_member_nickname(ctx["chat_id"], ctx["bot_wxid"])
+                message_segs.append({"type": "at", "data": {"qq": ctx["bot_wxid"], "name": nick}})
+            message_segs.append({"type": "text", "data": {"text": event_text}})
+            for index, local_path in downloaded:
+                message_segs.append({"type": "text", "data": {"text": f"\n[图片{index}]\n"}})
+                message_segs.append({
+                    "type": "image",
+                    "data": {"file": f"file:///{local_path.replace(os.sep, '/')}"},
+                })
+
+            event_data = {
+                "time": int(time.time()),
+                "self_id": ctx["bot_wxid"],
+                "post_type": "message",
+                "message_type": "group" if ctx["is_group"] else "private",
+                "sub_type": "normal" if ctx["is_group"] else "friend",
+                "user_id": ctx["from_wxid"],
+                "message_id": astrbot_ws._next_msg_id(),
+                "message": message_segs,
+                "raw_message": event_text,
+                "sender": _build_sender_info(
+                    ctx["from_wxid"], ctx["chat_id"] if ctx["is_group"] else ""
+                ),
+            }
+            if ctx["is_group"]:
+                event_data["group_id"] = ctx["chat_id"]
+            if astrbot_ws._loop:
+                future = asyncio.run_coroutine_threadsafe(
+                    astrbot_ws.send_event(event_data), astrbot_ws._loop
+                )
+                future.result(timeout=30)
+            logger.info(
+                f"[FORWARD VISION] 已发送 items={payload.get('item_count', 0)}, "
+                f"images={total_images}, downloaded={len(downloaded)}"
+            )
+        except Exception as e:
+            logger.error(f"转发聊天记录多图处理失败: {e}")
+
     def _handle_quoted_message(self, data):
         """处理 11061 引用消息"""
         try:
@@ -2482,6 +2804,7 @@ class WeChatServiceHandler:
             quote_content = parsed.get("quote_content", "")
             quote_sender = parsed.get("quote_sender", "")
             quote_sender_wxid = parsed.get("quote_sender_wxid", "")
+            quote_svrid = parsed.get("quote_svrid", "")
 
             if not user_text:
                 logger.warning(f"[11061] 无法解析用户文本")
@@ -2559,16 +2882,60 @@ class WeChatServiceHandler:
                     )
                 return
             else:
-                # 检查是否为转发聊天记录（无 refermsg，有 recorditem）
-                forward_content = self._parse_forward_record(raw_msg)
-                if forward_content:
+                # 引用消息里的 type=19 往往只有 datalist count=0；用 refermsg.svrid
+                # 回查此前收到并缓存的完整卡片，才能拿到逐条文字和图片 CDN 参数。
+                forward_payload, cache_hit = self._resolve_forward_record(quote_svrid, raw_msg)
+                if forward_payload:
+                    forward_content = forward_payload["text"]
+                    if not forward_payload.get("complete"):
+                        forward_content += (
+                            "\n[系统说明：微信引用只提供了文字摘要和图片占位符，"
+                            "未取得图片原文件；不要猜测图片内容。]"
+                        )
+
+                    downloadable_images = [
+                        image for image in forward_payload.get("images", [])
+                        if self._image_download_candidates(image)
+                    ]
+                    should_read_images = downloadable_images and (not is_group or mentioned_bot)
+                    if should_read_images:
+                        ctx = {
+                            "user_text": user_text,
+                            "from_wxid": from_wxid,
+                            "room_wxid": room_wxid,
+                            "to_wxid": to_wxid,
+                            "msgid": msgid,
+                            "quote_sender": quote_sender,
+                            "quote_sender_wxid": quote_sender_wxid,
+                            "is_group": is_group,
+                            "chat_id": chat_id,
+                            "bot_wxid": bot_wxid,
+                            "mentioned_bot": mentioned_bot,
+                        }
+                        threading.Thread(
+                            target=self._forward_record_images_and_send,
+                            args=(ctx, forward_payload),
+                            daemon=True,
+                            name="forward-record-vision",
+                        ).start()
+                        logger.info(
+                            f"[11061 FORWARD] 启动多图理解: cache_hit={cache_hit}, "
+                            f"items={forward_payload.get('item_count', 0)}, "
+                            f"images={len(downloadable_images)}"
+                        )
+                        return
+
                     quoted_text = forward_content
-                    import json as _json_mod
-                    quote_meta = _json_mod.dumps({
-                        "qt": "text", "qs": quote_sender, "qsw": quote_sender_wxid, "qtxt": forward_content,
+                    quote_meta = json.dumps({
+                        "qt": "forward", "qs": quote_sender,
+                        "qsw": quote_sender_wxid, "qtxt": forward_content,
                     }, ensure_ascii=False)
-                    alt_msg = f"{quote_meta}\n[转发 {quote_sender} 的消息:「{forward_content}」]\n{user_text}"
-                    logger.info(f"[11061 FORWARD] 提取转发聊天记录 ({len(forward_content)} 字符): {forward_content[:100]}...")
+                    alt_msg = f"{quote_meta}\n[转发聊天记录:「{forward_content}」]\n{user_text}"
+                    logger.info(
+                        f"[11061 FORWARD] 提取聊天记录: cache_hit={cache_hit}, "
+                        f"items={forward_payload.get('item_count', 0)}, "
+                        f"images={len(forward_payload.get('images', []))}"
+                    )
                 else:
                     # 文本引用 → 直接拼接上下文
                     quoted_text = quote_content
@@ -2916,6 +3283,87 @@ class WeChatServiceHandler:
             logger.warning(f"[11061 XML] 读取最近 appmsg raw_msg 失败: {e}")
         return ""
 
+    def _load_forward_record_cache(self):
+        """载入最近的完整合并转发 XML，供稍后的引用消息按 svrid 回查。"""
+        try:
+            if not os.path.exists(self._forward_record_cache_path):
+                return
+            with open(self._forward_record_cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, dict):
+                self._forward_record_cache = {
+                    str(key): value for key, value in cached.items()
+                    if isinstance(value, dict) and isinstance(value.get("raw_msg"), str)
+                }
+                logger.info(f"[FORWARD CACHE] 已载入 {len(self._forward_record_cache)} 条完整聊天记录")
+        except Exception as e:
+            logger.warning(f"[FORWARD CACHE] 载入失败: {e}")
+
+    def _save_forward_record_cache(self):
+        try:
+            os.makedirs(os.path.dirname(self._forward_record_cache_path), exist_ok=True)
+            with open(self._forward_record_cache_path, "w", encoding="utf-8") as f:
+                json.dump(self._forward_record_cache, f, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"[FORWARD CACHE] 保存失败: {e}")
+
+    def _cache_forward_record(self, data: dict, raw_msg: str):
+        """只缓存直接收到的 type=19 原始卡片；引用消息里的精简副本不覆盖它。"""
+        try:
+            root = ET.fromstring(raw_msg)
+            appmsg = root.find(".//appmsg")
+            if appmsg is None or self._xml_text(appmsg, "type") != "19":
+                return
+            payload = self._parse_forward_record_payload(raw_msg)
+            if not payload or not payload.get("complete"):
+                return
+            message_ids = []
+            for key in ("msgid", "newMsgId", "msg_id", "MsgSvrID", "msgSvrId"):
+                value = data.get(key) if isinstance(data, dict) else None
+                if value not in (None, ""):
+                    message_ids.append(str(value))
+            if not message_ids:
+                return
+
+            entry = {
+                "raw_msg": raw_msg,
+                "title": payload.get("title", ""),
+                "item_count": payload.get("item_count", 0),
+                "image_count": len(payload.get("images", [])),
+                "cached_at": int(time.time()),
+            }
+            with self._forward_record_cache_lock:
+                for message_id in message_ids:
+                    self._forward_record_cache[message_id] = entry
+                # 同一个 entry 可能有多个 ID；按写入时间保留最近 50 个键。
+                if len(self._forward_record_cache) > 50:
+                    oldest = sorted(
+                        self._forward_record_cache,
+                        key=lambda key: self._forward_record_cache[key].get("cached_at", 0),
+                    )
+                    for key in oldest[:len(self._forward_record_cache) - 50]:
+                        self._forward_record_cache.pop(key, None)
+                self._save_forward_record_cache()
+            logger.info(
+                f"[FORWARD CACHE] 已缓存 msgid={message_ids[0]}, "
+                f"items={entry['item_count']}, images={entry['image_count']}"
+            )
+        except ET.ParseError:
+            return
+        except Exception as e:
+            logger.warning(f"[FORWARD CACHE] 缓存失败: {e}")
+
+    def _resolve_forward_record(self, quote_svrid: str, fallback_raw_msg: str) -> tuple[dict | None, bool]:
+        """优先用 svrid 找完整原卡；返回 (payload, cache_hit)。"""
+        if quote_svrid:
+            with self._forward_record_cache_lock:
+                entry = self._forward_record_cache.get(str(quote_svrid))
+            if entry:
+                payload = self._parse_forward_record_payload(entry.get("raw_msg", ""))
+                if payload:
+                    return payload, True
+        return self._parse_forward_record_payload(fallback_raw_msg), False
+
     def _cache_last_voice_raw_msg(self, raw_msg: str):
         if not raw_msg:
             return
@@ -2942,6 +3390,7 @@ class WeChatServiceHandler:
                     f"preview={json.dumps(data, ensure_ascii=False)[:500]}"
                 )
             return
+        self._cache_forward_record(data, raw_msg)
         self._last_appmsg_raw_msg = raw_msg
         self._last_appmsg_by_type[message_type] = raw_msg
         raw_path = os.path.join(
