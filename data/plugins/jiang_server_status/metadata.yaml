@@ -1,0 +1,8 @@
+name: jiang_server_status
+display_name: 服务器状态
+desc: 通过结构化文本展示本机、SSH、HTTP 指标接口或 TCP 服务的运行状态
+author: fch
+version: 1.3.0
+astrbot_version: ">=4.8"
+support_platforms:
+  - aiocqhttp

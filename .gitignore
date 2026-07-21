@@ -14,6 +14,9 @@ data/plugins/*
 !data/plugins/jiang_tide/**
 !data/plugins/jiang_repeater/
 !data/plugins/jiang_repeater/**
+!data/plugins/jiang_server_status/
+!data/plugins/jiang_server_status/**
+data/plugins/jiang_server_status/__pycache__/
 *.dll
 
 # IDE / AI tools

@@ -1,0 +1,277 @@
+{
+  "card_title": {
+    "description": "状态文案标题",
+    "type": "string",
+    "default": "我的服务器"
+  },
+  "sample_seconds": {
+    "description": "本机性能采样时长（秒）",
+    "type": "float",
+    "default": 0.35,
+    "hint": "用于计算 CPU 与实时网络速率；建议保持在 0.2 至 1 秒之间。"
+  },
+  "max_servers_per_card": {
+    "description": "单条消息最多展示服务器数",
+    "type": "int",
+    "default": 6,
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "alarm_enabled": {
+    "description": "启用离线报警推送",
+    "type": "bool",
+    "default": true,
+    "hint": "后台定时检查全部已启用服务器，离线和恢复时主动推送消息。"
+  },
+  "alarm_target_sessions": {
+    "description": "报警推送会话",
+    "type": "list",
+    "default": [
+      "aiocqhttp:FriendMessage:fengchenhao002"
+    ],
+    "hint": "填写完整 unified_msg_origin；默认私聊管理员 fengchenhao002。"
+  },
+  "alarm_interval_seconds": {
+    "description": "报警检查间隔（秒）",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 10,
+      "max": 3600,
+      "step": 10
+    }
+  },
+  "alarm_failure_threshold": {
+    "description": "连续失败次数",
+    "type": "int",
+    "default": 3,
+    "hint": "达到此次数才判定离线，避免短时网络抖动误报。",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "alarm_recovery_threshold": {
+    "description": "连续恢复次数",
+    "type": "int",
+    "default": 2,
+    "hint": "离线后连续探测成功达到此次数，才发送恢复通知。",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "alarm_repeat_minutes": {
+    "description": "持续离线重复提醒（分钟）",
+    "type": "int",
+    "default": 60,
+    "hint": "服务器保持离线时的重复提醒间隔，填 0 可关闭重复提醒。",
+    "slider": {
+      "min": 0,
+      "max": 1440,
+      "step": 10
+    }
+  },
+  "servers": {
+    "description": "服务器列表",
+    "type": "template_list",
+    "hint": "可添加本机监控、HTTP 指标接口、SSH 指标或 TCP 在线探针；命令可用服务器 ID 或名称筛选。",
+    "default": [],
+    "templates": {
+      "local": {
+        "name": "本机监控",
+        "description": "采集 AstrBot 所在机器的 CPU、内存、磁盘、网络和服务端口。",
+        "items": {
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          },
+          "id": {
+            "description": "服务器 ID",
+            "type": "string",
+            "default": "local",
+            "hint": "用于命令筛选，建议只使用字母、数字、短横线或下划线。"
+          },
+          "name": {
+            "description": "显示名称",
+            "type": "string",
+            "default": "本机服务器"
+          },
+          "location": {
+            "description": "位置说明",
+            "type": "string",
+            "default": "本机"
+          },
+          "disk_paths": {
+            "description": "统计的磁盘路径",
+            "type": "list",
+            "default": [
+              "C:\\"
+            ],
+            "hint": "Windows 可填写 C:\\、D:\\；Linux 可填写 /、/data。多个分区会合并显示。"
+          },
+          "service_checks": {
+            "description": "服务端口检查",
+            "type": "text",
+            "default": "AstrBot|127.0.0.1|6185",
+            "hint": "每行一个，格式：名称|主机|端口。服务不可达时服务器会显示为“需关注”。"
+          }
+        }
+      },
+      "http": {
+        "name": "HTTP 指标接口",
+        "description": "从远程 JSON 接口获取完整系统指标。",
+        "items": {
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          },
+          "id": {
+            "description": "服务器 ID",
+            "type": "string",
+            "default": "remote"
+          },
+          "name": {
+            "description": "显示名称",
+            "type": "string",
+            "default": "远程服务器"
+          },
+          "location": {
+            "description": "位置说明",
+            "type": "string",
+            "default": "远程机房"
+          },
+          "api_url": {
+            "description": "指标接口 URL",
+            "type": "string",
+            "default": "https://example.com/status",
+            "hint": "接口 JSON 格式见插件 README。"
+          },
+          "api_token": {
+            "description": "Bearer Token",
+            "type": "string",
+            "default": "",
+            "hint": "可留空。填写后通过 Authorization: Bearer 请求头发送，请勿在群聊中展示。"
+          },
+          "verify_ssl": {
+            "description": "校验 HTTPS 证书",
+            "type": "bool",
+            "default": true
+          },
+          "timeout_seconds": {
+            "description": "请求超时（秒）",
+            "type": "float",
+            "default": 5.0
+          }
+        }
+      },
+      "ssh": {
+        "name": "SSH 系统指标",
+        "description": "通过现有 SSH 密钥只读采集 Linux 的 CPU、内存、磁盘、网络和运行时长。",
+        "items": {
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          },
+          "id": {
+            "description": "服务器 ID",
+            "type": "string",
+            "default": "ssh-server"
+          },
+          "name": {
+            "description": "显示名称",
+            "type": "string",
+            "default": "Linux 服务器"
+          },
+          "location": {
+            "description": "位置说明",
+            "type": "string",
+            "default": "远程节点"
+          },
+          "host": {
+            "description": "SSH 主机名或 IP",
+            "type": "string",
+            "default": "127.0.0.1",
+            "hint": "仅保存在 AstrBot 运行时配置中，不会显示在状态卡或告警消息里。"
+          },
+          "port": {
+            "description": "SSH 端口",
+            "type": "int",
+            "default": 22
+          },
+          "username": {
+            "description": "SSH 用户名",
+            "type": "string",
+            "default": "root"
+          },
+          "identity_file": {
+            "description": "SSH 私钥文件",
+            "type": "string",
+            "default": "",
+            "hint": "留空时使用当前 Windows 用户的默认 SSH 密钥或 ssh-agent。"
+          },
+          "verify_host_key": {
+            "description": "严格校验已知主机指纹",
+            "type": "bool",
+            "default": true,
+            "hint": "首次连接前需确保目标已存在于当前用户的 known_hosts。"
+          },
+          "timeout_seconds": {
+            "description": "采集超时（秒）",
+            "type": "float",
+            "default": 8.0
+          }
+        }
+      },
+      "tcp": {
+        "name": "TCP 在线探针",
+        "description": "只检查远程主机端口是否在线及连接延迟。",
+        "items": {
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          },
+          "id": {
+            "description": "服务器 ID",
+            "type": "string",
+            "default": "tcp-server"
+          },
+          "name": {
+            "description": "显示名称",
+            "type": "string",
+            "default": "TCP 服务"
+          },
+          "location": {
+            "description": "位置说明",
+            "type": "string",
+            "default": "远程节点"
+          },
+          "host": {
+            "description": "主机名或 IP",
+            "type": "string",
+            "default": "127.0.0.1"
+          },
+          "port": {
+            "description": "端口",
+            "type": "int",
+            "default": 80
+          },
+          "timeout_seconds": {
+            "description": "连接超时（秒）",
+            "type": "float",
+            "default": 3.0
+          }
+        }
+      }
+    }
+  }
+}
