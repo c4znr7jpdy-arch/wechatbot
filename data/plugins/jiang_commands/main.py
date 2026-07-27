@@ -21,6 +21,7 @@ except ImportError:
 
 from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
+import astrbot.api.message_components as Comp
 
 logger = logging.getLogger("jiang_commands")
 
@@ -143,7 +144,8 @@ import ai_plugin.oilprice as _oilprice_mod
 import ai_plugin.bilibili_dynamic as _bili_mod
 import ai_plugin.help_card as _help_mod
 
-# 共享模块不在本插件的热更新清理范围内；油价模块无状态，可安全刷新。
+# 共享模块不在本插件的热更新清理范围内；显式刷新本插件依赖的可重载模块。
+_bili_mod = importlib.reload(_bili_mod)
 _oilprice_mod = importlib.reload(_oilprice_mod)
 
 fetch_hot_news = _news_mod.fetch_hot_news
@@ -155,7 +157,7 @@ format_epic_free = _epic_mod.format_epic_free
 fetch_kfc_text = _kfc_mod.fetch_kfc_text
 fetch_oilprice = _oilprice_mod.fetch_oilprice
 format_oilprice = _oilprice_mod.format_oilprice
-fetch_dynamics = _bili_mod.fetch_dynamics
+fetch_latest_dynamic_message = _bili_mod.fetch_latest_dynamic_message
 generate_help_card = _help_mod.generate_help_card
 
 
@@ -373,32 +375,24 @@ class Main(star.Star):
     async def yanyun(self, event: AstrMessageEvent):
         """燕云十六声官方动态"""
         try:
-            items = await fetch_dynamics("1567141152", count=3)
-            if not items:
-                _record_event_action(
-                    event,
-                    "info.yanyun_dynamic",
-                    "燕云十六声动态",
-                    {"count": 3},
-                )
-                yield event.plain_result("暂无燕云动态")
-                return
-            lines = ["燕云十六声最新动态："]
-            for i, item in enumerate(items, 1):
-                title = item.get("title") or item.get("text", "")[:50]
-                author = item.get("author", "")
-                ts = item.get("timestamp", "")
-                if title:
-                    lines.append(f"{i}. {title}")
-                if author:
-                    lines.append(f"   —— {author}")
+            text, image_path = await fetch_latest_dynamic_message(
+                "1567141152",
+                title="燕云十六声",
+            )
             _record_event_action(
                 event,
                 "info.yanyun_dynamic",
                 "燕云十六声动态",
-                {"count": 3},
+                {"count": 1},
             )
-            yield event.plain_result("\n".join(lines))
+            chain = [Comp.Plain(text)]
+            if image_path:
+                chain.append(Comp.Image.fromFileSystem(image_path))
+            try:
+                yield event.chain_result(chain)
+            finally:
+                if image_path:
+                    Path(image_path).unlink(missing_ok=True)
         except Exception as e:
             logger.exception(f"/燕云 失败: {e}")
             yield event.plain_result(f"获取燕云动态失败: {e}")

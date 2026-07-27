@@ -65,7 +65,7 @@ AI chat is handled entirely by AstrBot's provider pipeline. The legacy Hermes st
 
 - `jiang_commands` — reuses `news` / `weather` / `epic` / `kfc` / `oilprice` / `bilibili_dynamic` / `help_card`
 - `jiang_douyin` — reuses `douyin/` parser
-- `jiang_image` — reuses `image_generator` / `image_editor`
+- `jiang_image` — runtime-configurable GemAI/OpenAI-compatible/MiniMax image generation with an AstrBot Plugin Page
 - `jiang_mystool` / `jiang_repeater` / `jiang_rocom` / `jiang_schedule` / `jiang_group_notice` — corresponding modules
 
 `data/plugins/_nonebot_stubs.py` shims `nonebot` so NoneBot-style modules can be imported inside AstrBot.

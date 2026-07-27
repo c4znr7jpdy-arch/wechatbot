@@ -21,8 +21,8 @@
 
 | 功能 | 触发方式 | 后端 |
 |------|---------|------|
-| 文生图 | "生成/画一张xxx" | GPT / MiniMax（可切换） |
-| 图生图 | 引用图片 + "P图/改图" | GPT / MiniMax |
+| 文生图 | "生成/画一张xxx" | GemAI `gpt-image-2-2K`（默认）+ 可配置回退 |
+| 图生图 | 引用图片 + "P图/改图" | GemAI / OpenAI 兼容 / MiniMax |
 | 视频生成 | "生成视频xxx" | MiniMax Hailuo |
 | 语音合成 | `#语音 <文本>` | Edge TTS（6 种音色） |
 
@@ -65,7 +65,7 @@
 | `#插件列表` | 查看所有功能模块状态 |
 | `#启用 <key>` | 启用指定功能模块 |
 | `#禁用 <key>` | 禁用指定功能模块 |
-| `#切换图片模型 gpt/minimax` | 切换文生图 + 图生图后端 |
+| `#切换图片模型 <模型ID>` | 切换 WebUI 中已启用的生图模型 |
 | `#切换图片模型` | 查看当前模型 |
 | `#语音 <文本>` | 生成语音消息 |
 | `#切换音色 <名称>` | 切换 TTS 音色（小艺/晓晓/云扬/云希/晓萱/晓墨） |
@@ -168,7 +168,7 @@ AstrBot 插件通过 WebUI（http://localhost:6185）启用/禁用。`ai_plugin/
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │            ai_plugin/  (模块库，非独立进程)                       │
-│  image_generator / image_editor  ── 文生图 / 图生图 (GPT+MiniMax) │
+│  image_generator / image_editor  ── 旧版生图兼容模块              │
 │  video_generator                  ── 文生视频 (MiniMax Hailuo)   │
 │  tts.py                           ── 语音合成 (edge-tts → silk)  │
 │  douyin/                          ── 抖音/TikTok/B站 解析        │
@@ -286,7 +286,7 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python311-32\python.exe mai
 ```env
 ENV_NAME=prod
 
-# GPT-Image (文生图 + 图生图)
+# 旧生图后端（jiang_image 会迁移为 WebUI 回退项）
 GPT_IMAGE_API_KEY=sk-xxx
 GPT_IMAGE_BASE_URL=https://sub.xiuxianjyj.xin/v1
 GPT_IMAGE_MODEL=gpt-image-2
@@ -304,6 +304,14 @@ DOUYIN_COOKIE=xxx
 # 网络代理（色图插件用）
 HTTP_PROXY=http://127.0.0.1:7890
 ```
+
+### 生图模型 WebUI
+
+`jiang_image` 的默认运行配置保存在 `data/plugin_data/jiang_image/models.json`，默认使用 GemAI `gpt-image-2-2K`。进入 AstrBot WebUI：
+
+`插件 → 姜小妹生图 → Pages → 生图模型管理`
+
+可新增、修改、停用、删除和测试 OpenAI Images、OpenAI Chat 生图及 MiniMax 模型，也可设置默认模型与自动回退顺序。所有保存和默认模型切换都会立即热更新，不需要重启 AstrBot。API Key 只保存在后端，页面仅显示掩码。
 
 ## 常见问题
 

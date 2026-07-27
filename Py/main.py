@@ -22,6 +22,7 @@ import json as _json
 import re
 import uuid as _uuid
 from html import unescape
+from pathlib import Path
 import xml.etree.ElementTree as ET
 
 # 253 读取wx消息
@@ -1860,6 +1861,8 @@ class WeChatServiceHandler:
         self._pending_cdn = {}  # trace_id -> {"event": threading.Event, "result": None}
         self._pending_image_quotes = {}  # trace_id -> dict (image quote context waiting for CDN download)
         self._pending_voice_downloads = {}  # trace_id -> dict (voice CDN download context)
+        self._video_download_locks = {}
+        self._video_download_locks_guard = threading.Lock()
         self._pending_group_refresh = {}  # trace_id -> {"event": threading.Event, "data": dict}
         self._last_voice_raw_msg = ""
         self._last_voice_raw_path = os.path.join(os.path.dirname(__file__), "data", "voice", "last_voice_raw.xml")
@@ -2346,6 +2349,10 @@ class WeChatServiceHandler:
         elif message_type == 11048:
             # 语音消息，抓取本地 silk/slik 文件路径并转发给 AstrBot
             self._handle_voice_message(data)
+        elif message_type == 11051:
+            # 视频消息：后台下载 CDN 视频并以 OneBot video 消息段转发给 AstrBot。
+            # 下载不能阻塞 DLL 回调线程，否则 11230 响应无法被本处理器接收。
+            self._handle_video_message(data)
         elif message_type == 11059:
             # 撤回消息通知
             logger.info(f"[撤回] from={data.get('from_wxid', '')} to={data.get('to_wxid', '')} "
@@ -2835,6 +2842,43 @@ class WeChatServiceHandler:
                 return
 
             from datetime import datetime
+
+            if quote_type == 43:
+                # 引用视频：按 refermsg.svrid 精确关联原视频；群聊只有当前消息
+                # @机器人或使用命令前缀时才触发下载与理解。
+                if is_group and not mentioned_bot and not _is_command_message(user_text):
+                    logger.info(
+                        f"[11061 VIDEO] 群聊引用视频未唤醒机器人，忽略: "
+                        f"svrid={quote_svrid}"
+                    )
+                    return
+                video_cdn_info = self._parse_video_cdn_info(quote_content)
+                video_ctx = {
+                    "user_text": user_text,
+                    "from_wxid": from_wxid,
+                    "room_wxid": room_wxid,
+                    "to_wxid": to_wxid,
+                    "msgid": msgid,
+                    "quote_svrid": quote_svrid,
+                    "quote_sender": quote_sender,
+                    "quote_sender_wxid": quote_sender_wxid,
+                    "is_group": is_group,
+                    "chat_id": chat_id,
+                    "bot_wxid": bot_wxid,
+                    "mentioned_bot": mentioned_bot,
+                }
+                threading.Thread(
+                    target=self._forward_quoted_video,
+                    args=(video_ctx, video_cdn_info),
+                    daemon=True,
+                    name=f"quoted-video-{str(quote_svrid or msgid)[-8:]}",
+                ).start()
+                logger.info(
+                    f"[11061 VIDEO] 启动引用视频处理: svrid={quote_svrid}, "
+                    f"cdn={bool(video_cdn_info.get('file_id'))}, "
+                    f"mentioned={mentioned_bot}"
+                )
+                return
 
             if quote_type == 3:
                 # 图片引用 → 先发 CDN 下载请求（非阻塞），多级 fallback
@@ -3517,6 +3561,373 @@ class WeChatServiceHandler:
                 logger.warning("astrbot_ws._loop 未设置，无法转发语音消息")
         except Exception as e:
             logger.error(f"处理语音消息失败: {e}")
+
+    @staticmethod
+    def _parse_video_cdn_info(raw_msg: str) -> dict:
+        """解析 11051 videomsg XML 中的视频 CDN 参数。"""
+        import xml.etree.ElementTree as ET
+
+        if not raw_msg:
+            return {}
+        decoded = raw_msg
+        for _ in range(5):
+            next_value = unescape(decoded)
+            if next_value == decoded:
+                break
+            decoded = next_value
+        try:
+            root = ET.fromstring(decoded)
+            video = root if root.tag == "videomsg" else root.find(".//videomsg")
+            if video is None:
+                return {}
+            attrs = dict(video.attrib)
+            return {
+                "aes_key": attrs.get("aeskey", ""),
+                "file_id": attrs.get("cdnvideourl", ""),
+                "raw_aes_key": attrs.get("cdnrawvideoaeskey", ""),
+                "raw_file_id": attrs.get("cdnrawvideourl", ""),
+                "length": attrs.get("length", ""),
+                "raw_length": attrs.get("rawlength", ""),
+                "play_length": attrs.get("playlength", ""),
+                "md5": attrs.get("md5", "") or attrs.get("newmd5", ""),
+            }
+        except (ET.ParseError, ValueError) as exc:
+            logger.warning(f"[VIDEO 11051] videomsg XML 解析失败: {exc}")
+            return {}
+
+    def _download_cdn_file_sync(
+        self,
+        file_id: str,
+        aes_key: str,
+        save_path: str,
+        *,
+        file_type: int,
+        timeout: float = 90,
+    ) -> str | None:
+        """在后台线程等待 11230 CDN 响应并返回下载路径。"""
+        trace_id = str(_uuid.uuid4())
+        event = threading.Event()
+        self._pending_cdn[trace_id] = {"event": event, "result": None}
+        try:
+            self.service.helper_cdn_download(
+                file_id,
+                aes_key,
+                save_path,
+                trace_id,
+                file_type=file_type,
+            )
+            if not event.wait(timeout=timeout):
+                logger.warning(
+                    f"[VIDEO CDN] 下载超时: trace={trace_id}, file_type={file_type}"
+                )
+                return None
+            result = self._pending_cdn.get(trace_id, {}).get("result") or {}
+            if result.get("error_code") != 0:
+                logger.warning(
+                    f"[VIDEO CDN] 下载失败: trace={trace_id}, "
+                    f"error_code={result.get('error_code')}, file_type={file_type}"
+                )
+                return None
+            resolved = result.get("save_path") or save_path
+            if os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
+                return resolved
+            logger.warning(f"[VIDEO CDN] 响应成功但文件不存在或为空: {resolved}")
+            return None
+        except Exception as exc:
+            logger.error(f"[VIDEO CDN] 下载异常: {exc}")
+            return None
+        finally:
+            self._pending_cdn.pop(trace_id, None)
+
+    @staticmethod
+    def _cleanup_received_video_cache(video_dir: str, max_age_seconds: int = 43200):
+        """清理桥接层超过 12 小时的已接收视频。"""
+        import time as _time_video_cleanup
+
+        now = _time_video_cleanup.time()
+        try:
+            for name in os.listdir(video_dir):
+                if not name.startswith("video_") or not name.lower().endswith(".mp4"):
+                    continue
+                path = os.path.join(video_dir, name)
+                try:
+                    if now - os.path.getmtime(path) > max_age_seconds:
+                        os.remove(path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def _video_download_lock(self, source_msgid: str) -> threading.Lock:
+        """同一条视频只允许一个 CDN 下载线程。"""
+        with self._video_download_locks_guard:
+            lock = self._video_download_locks.get(source_msgid)
+            if lock is None:
+                lock = threading.Lock()
+                self._video_download_locks[source_msgid] = lock
+            return lock
+
+    def _download_or_get_video(self, cdn_info: dict, source_msgid: str) -> str | None:
+        """按原消息 ID 复用缓存；未命中时下载视频 CDN。"""
+        video_dir = os.path.join(os.path.dirname(__file__), "data", "video")
+        os.makedirs(video_dir, exist_ok=True)
+        self._cleanup_received_video_cache(video_dir)
+
+        safe_msgid = re.sub(r"[^0-9A-Za-z_-]", "_", source_msgid)[:80]
+        save_path = os.path.abspath(
+            os.path.join(video_dir, f"video_{safe_msgid}.mp4")
+        )
+        lock = self._video_download_lock(source_msgid)
+        with lock:
+            if os.path.isfile(save_path) and os.path.getsize(save_path) > 0:
+                logger.info(f"[VIDEO CDN] 命中原消息缓存: msgid={source_msgid}")
+                return save_path
+
+            file_id = cdn_info.get("file_id", "")
+            aes_key = cdn_info.get("aes_key", "")
+            if not file_id or not aes_key:
+                logger.warning(
+                    f"[VIDEO CDN] 无缓存且引用 XML 缺少下载参数: msgid={source_msgid}"
+                )
+                return None
+
+            try:
+                max_bytes = int(
+                    cdn_info.get("max_bytes")
+                    or os.getenv("WECHAT_VIDEO_MAX_BYTES", str(100 * 1024 * 1024))
+                )
+            except (TypeError, ValueError):
+                max_bytes = 100 * 1024 * 1024
+            try:
+                declared_size = int(cdn_info.get("length") or 0)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > max_bytes:
+                logger.warning(
+                    f"[VIDEO CDN] 视频超过下载限制: msgid={source_msgid}, "
+                    f"size={declared_size}, limit={max_bytes}"
+                )
+                return None
+
+            candidates = []
+            if cdn_info.get("raw_file_id") and cdn_info.get("raw_aes_key"):
+                try:
+                    raw_size = int(cdn_info.get("raw_length") or 0)
+                except (TypeError, ValueError):
+                    raw_size = 0
+                if raw_size and raw_size <= max_bytes:
+                    candidates.append(
+                        (cdn_info["raw_file_id"], cdn_info["raw_aes_key"], "raw")
+                    )
+            candidates.append((file_id, aes_key, "standard"))
+
+            for candidate_id, candidate_key, quality in candidates:
+                try:
+                    if os.path.exists(save_path):
+                        os.remove(save_path)
+                except OSError:
+                    pass
+                logger.info(
+                    f"[VIDEO CDN] 尝试下载: msgid={source_msgid}, quality={quality}, "
+                    f"playlength={cdn_info.get('play_length')}, "
+                    f"declared_size={declared_size}"
+                )
+                local_path = self._download_cdn_file_sync(
+                    candidate_id,
+                    candidate_key,
+                    save_path,
+                    file_type=4,
+                    timeout=90,
+                )
+                if local_path:
+                    return local_path
+            logger.warning(f"[VIDEO CDN] 所有下载候选均失败: msgid={source_msgid}")
+            return None
+
+    def _forward_video_event(
+        self,
+        data: dict,
+        cdn_info: dict,
+        local_path: str,
+        *,
+        source_msgid: str,
+        user_text: str = "",
+        mentioned_bot: bool = False,
+        quoted: bool = False,
+    ):
+        """把已下载视频转为 OneBot V11 事件，可附带引用者的 @ 和问题。"""
+        astrbot_ws = get_astrbot_ws_client()
+        if not astrbot_ws or not astrbot_ws.is_connected():
+            logger.warning("AstrBot 已断开，下载后的视频未转发")
+            return
+
+        from_wxid = data.get("from_wxid", "")
+        room_wxid = data.get("room_wxid", "")
+        is_group = bool(room_wxid)
+        bot_wxid = (
+            astrbot_ws._bot_wxid
+            or os.getenv("BOT_IDENTIFIER", "wechat_bot")
+        )
+        message_segs = []
+        if is_group and mentioned_bot:
+            nick = _lookup_member_nickname(room_wxid, bot_wxid)
+            message_segs.append(
+                {"type": "at", "data": {"qq": bot_wxid, "name": nick}}
+            )
+        message_segs.append(
+            {
+                "type": "video",
+                "data": {
+                    "file": Path(local_path).resolve().as_uri(),
+                    "path": os.path.abspath(local_path),
+                },
+            }
+        )
+        event_text = ""
+        if user_text:
+            event_text = _with_sender_identity(
+                user_text,
+                from_wxid,
+                room_wxid if is_group else "",
+            )
+            message_segs.append({"type": "text", "data": {"text": event_text}})
+
+        event_data = {
+            "time": int(data.get("timestamp") or time.time()),
+            "self_id": bot_wxid,
+            "post_type": "message",
+            "message_type": "group" if is_group else "private",
+            "sub_type": "normal" if is_group else "friend",
+            "user_id": from_wxid,
+            "message_id": astrbot_ws._next_msg_id(),
+            "message": message_segs,
+            "raw_message": event_text or "[视频]",
+            "sender": _build_sender_info(
+                from_wxid,
+                room_wxid if is_group else "",
+            ),
+            "raw_video": {
+                "msgid": source_msgid,
+                "play_length": cdn_info.get("play_length", ""),
+                "length": cdn_info.get("length", ""),
+                "md5": cdn_info.get("md5", ""),
+                "quoted": quoted,
+            },
+        }
+        if is_group:
+            event_data["group_id"] = room_wxid
+
+        if not astrbot_ws._loop:
+            logger.warning("astrbot_ws._loop 未设置，无法转发视频消息")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            astrbot_ws.send_event(event_data),
+            astrbot_ws._loop,
+        )
+        future.result(timeout=10)
+        logger.info(
+            f"[VIDEO] 视频事件已转发: source_msgid={source_msgid}, "
+            f"quoted={quoted}, path={local_path}, size={os.path.getsize(local_path)}"
+        )
+
+    def _forward_quoted_video(self, ctx: dict, cdn_info: dict):
+        """下载或复用被引用的精确视频，并把引用问题与视频放进同一事件。"""
+        try:
+            source_msgid = str(ctx.get("quote_svrid") or ctx.get("msgid") or _uuid.uuid4())
+            local_path = self._download_or_get_video(cdn_info, source_msgid)
+            if not local_path:
+                target = ctx.get("chat_id") or ctx.get("from_wxid")
+                if target:
+                    self.service.helper_send_text(
+                        target,
+                        "引用的视频已过期或下载失败，重新发送视频后再试。",
+                    )
+                return
+            event_data = {
+                "from_wxid": ctx.get("from_wxid", ""),
+                "room_wxid": ctx.get("room_wxid", ""),
+                "to_wxid": ctx.get("to_wxid", ""),
+                "timestamp": int(time.time()),
+            }
+            self._forward_video_event(
+                event_data,
+                cdn_info,
+                local_path,
+                source_msgid=source_msgid,
+                user_text=ctx.get("user_text", ""),
+                mentioned_bot=bool(ctx.get("mentioned_bot")),
+                quoted=True,
+            )
+        except Exception as exc:
+            logger.error(f"引用视频下载并转发失败: {exc}")
+
+    def _handle_video_message(self, data):
+        """接收 11051 视频消息并在后台完成 CDN 下载。"""
+        try:
+            logger.info(
+                f"[VIDEO 11051 RAW] {json.dumps(data, ensure_ascii=False)[:2000]}"
+            )
+            astrbot_ws = get_astrbot_ws_client()
+            if not astrbot_ws or not astrbot_ws.is_connected():
+                logger.warning("AstrBot 未连接，视频消息未转发")
+                return
+
+            from_wxid = data.get("from_wxid", "")
+            bot_wxid = (
+                astrbot_ws._bot_wxid
+                or os.getenv("BOT_IDENTIFIER", "wechat_bot")
+            )
+            if from_wxid == bot_wxid or data.get("isSendMsg") == 1:
+                return
+
+            raw_msg = data.get("raw_msg", "")
+            cdn_info = self._parse_video_cdn_info(raw_msg)
+            if not cdn_info.get("file_id") or not cdn_info.get("aes_key"):
+                logger.warning("[VIDEO 11051] 缺少 cdnvideourl 或 aeskey")
+                return
+
+            try:
+                declared_size = int(cdn_info.get("length") or 0)
+            except (TypeError, ValueError):
+                declared_size = 0
+            try:
+                max_bytes = int(
+                    os.getenv("WECHAT_VIDEO_MAX_BYTES", str(100 * 1024 * 1024))
+                )
+            except ValueError:
+                max_bytes = 100 * 1024 * 1024
+            if declared_size > max_bytes:
+                logger.warning(
+                    f"[VIDEO 11051] 视频超过下载限制: size={declared_size}, "
+                    f"limit={max_bytes}"
+                )
+                return
+            cdn_info["max_bytes"] = max_bytes
+
+            threading.Thread(
+                target=self._download_and_forward_video,
+                args=(data, cdn_info),
+                daemon=True,
+                name=f"video-cdn-{str(data.get('msgid', 'unknown'))[-8:]}",
+            ).start()
+        except Exception as exc:
+            logger.error(f"处理视频消息失败: {exc}")
+
+    def _download_and_forward_video(self, data: dict, cdn_info: dict):
+        """后台下载视频并构造 OneBot V11 video 消息事件。"""
+        try:
+            source_msgid = str(data.get("msgid") or _uuid.uuid4())
+            local_path = self._download_or_get_video(cdn_info, source_msgid)
+            if not local_path:
+                return
+            self._forward_video_event(
+                data,
+                cdn_info,
+                local_path,
+                source_msgid=source_msgid,
+            )
+        except Exception as exc:
+            logger.error(f"下载并转发视频失败: {exc}")
 
     @CLOSE_CALLBACK(in_class=True)
     def on_close(self, client_id):

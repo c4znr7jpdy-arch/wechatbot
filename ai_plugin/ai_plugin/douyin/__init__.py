@@ -19,17 +19,23 @@ _crawler = None
 _crawler_ready = False
 
 # URL 匹配模式
+# 转发事件中的换行可能是字面量 ``\n``，所以 URL 不能使用会吞掉反斜杠的 ``\S+``。
+# B 站长链接只接受爬虫实际支持的 BV 视频页；/read/cv... 专栏留给普通 AI 分析。
 _DOUYIN_RE = re.compile(
-    r"https?://(?:v\.douyin\.com|www\.douyin\.com|douyin\.com)/\S+",
+    r"""https?://(?:v\.douyin\.com|www\.douyin\.com|douyin\.com)/[^\s\\<>"']+""",
     re.IGNORECASE,
 )
 _TIKTOK_RE = re.compile(
-    r"https?://(?:www\.tiktok\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/\S+",
+    r"""https?://(?:www\.tiktok\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/[^\s\\<>"']+""",
     re.IGNORECASE,
 )
 _BILIBILI_RE = re.compile(
-    r"https?://(?:www\.bilibili\.com|bilibili\.com|b23\.tv|b22\.tv)/\S+",
+    r"""https?://(?:(?:www\.|m\.)?bilibili\.com/(?:video/)?BV[A-Za-z0-9]+"""
+    r"""|(?:b23\.tv|b22\.tv)/[^\s\\<>"']+)[^\s\\<>"']*""",
     re.IGNORECASE,
+)
+VIDEO_URL_PATTERN = (
+    rf"(?i:{_DOUYIN_RE.pattern}|{_TIKTOK_RE.pattern}|{_BILIBILI_RE.pattern})"
 )
 # B站用户空间: space.bilibili.com/UID 或 bilibili.com/space/UID（协议可选）
 _BILIBILI_SPACE_RE = re.compile(

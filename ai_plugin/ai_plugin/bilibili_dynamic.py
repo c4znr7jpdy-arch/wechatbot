@@ -15,7 +15,6 @@ from .douyin.crawlers.bilibili.web.web_crawler import BilibiliWebCrawler
 
 
 _crawler = BilibiliWebCrawler()
-_IMG_MAX = 3
 
 _SUMMARIZE_PROMPT = """你是一个B站动态摘要助手。把下面的动态列表改写为简洁有趣的中文摘要，要求：
 - 保留每条的序号、类型标签、时间
@@ -79,6 +78,7 @@ async def fetch_dynamics(uid: str, count: int = 5) -> list[dict]:
             "dynamic_id": item.get("id_str", ""),
             "timestamp": author_mod.get("pub_ts", 0),
             "author": author_mod.get("name", ""),
+            "avatar": author_mod.get("face", ""),
         }
 
         if dtype == "DYNAMIC_TYPE_AV":
@@ -102,6 +102,10 @@ async def fetch_dynamics(uid: str, count: int = 5) -> list[dict]:
             entry["type"] = "article"
             entry["title"] = article.get("title", "")
             entry["text"] = desc.get("text", "") or article.get("desc", "")
+            entry["covers"] = [
+                cover for cover in article.get("covers", []) if cover
+            ]
+            entry["article_url"] = article.get("jump_url", "")
         else:
             continue
 
@@ -152,6 +156,92 @@ def _truncate(text: str, limit: int = 100) -> str:
     return text
 
 
+def _normalize_url(url: str) -> str:
+    url = str(url or "").strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://"):
+        return f"https://{url.removeprefix('http://')}"
+    return url
+
+
+def dynamic_image_url(item: dict) -> str:
+    """返回最能代表动态内容的一张图片，必要时回退到作者头像。"""
+    if item.get("type") == "image":
+        pictures = item.get("pictures", [])
+        if pictures:
+            return _normalize_url(pictures[0])
+    if item.get("type") == "video" and item.get("cover"):
+        return _normalize_url(item["cover"])
+    if item.get("type") == "article":
+        covers = item.get("covers", [])
+        if covers:
+            return _normalize_url(covers[0])
+    return _normalize_url(item.get("avatar", ""))
+
+
+def dynamic_link(item: dict) -> str:
+    """返回动态对应的 B站页面。"""
+    if item.get("type") == "video" and item.get("bvid"):
+        return f"https://www.bilibili.com/video/{item['bvid']}"
+    if item.get("type") == "article" and item.get("article_url"):
+        return _normalize_url(item["article_url"])
+    dynamic_id = str(item.get("dynamic_id", "") or "").strip()
+    return f"https://t.bilibili.com/{dynamic_id}" if dynamic_id else ""
+
+
+def format_latest_dynamic(item: dict, title: str = "") -> str:
+    """将最新一条动态格式化成适合微信发送的简洁文本。"""
+    dtype = item.get("type", "")
+    type_tag = {
+        "video": "视频",
+        "image": "图文",
+        "text": "动态",
+        "article": "专栏",
+    }.get(dtype, "动态")
+    headline = str(item.get("title", "") or "").strip()
+    body = str(
+        item.get("text", "")
+        or item.get("description", "")
+        or ""
+    ).strip()
+
+    lines = [f"{title}最新动态" if title else "B站最新动态"]
+    if headline:
+        lines.append(f"[{type_tag}] {headline}")
+        if body and body != headline:
+            lines.append(_truncate(body, 180))
+    else:
+        lines.append(f"[{type_tag}] {_truncate(body or '(无文字内容)', 220)}")
+
+    author = str(item.get("author", "") or "").strip()
+    time_str = _ts_to_str(item.get("timestamp", 0))
+    if author:
+        lines.append(f"作者：{author}")
+    if time_str:
+        lines.append(f"时间：{time_str}")
+    link = dynamic_link(item)
+    if link:
+        lines.append(f"链接：{link}")
+    return "\n".join(lines)
+
+
+async def fetch_latest_dynamic_message(
+    uid: str,
+    title: str = "",
+) -> tuple[str, str | None]:
+    """获取最新一条动态，并准备文本和一张本地图片。"""
+    # 空间动态流可能包含置顶旧动态，多取几条后按发布时间选择真正最新的一条。
+    items = await fetch_dynamics(uid, count=10)
+    if not items:
+        return f"{title or f'B站用户 {uid}'}暂无动态", None
+
+    item = max(items, key=lambda value: int(value.get("timestamp", 0) or 0))
+    text = format_latest_dynamic(item, title=title)
+    image_path = await download_image(dynamic_image_url(item))
+    return text, image_path
+
+
 def _format_item(idx: int, item: dict) -> str:
     """格式化单条动态为文本行"""
     time_str = _ts_to_str(item.get("timestamp", 0))
@@ -189,7 +279,7 @@ def _format_item(idx: int, item: dict) -> str:
 
 async def send_dynamics_list(bot, target_id: str, is_group: bool,
                              items: list[dict], title: str = ""):
-    """将多条动态合并为一条消息发送（时间倒序，最新在前，AI润色）"""
+    """只发送最新一条动态，并附带一张相关图片。"""
     detail_type = "group" if is_group else "private"
     kwargs = {
         "detail_type": detail_type,
@@ -201,17 +291,20 @@ async def send_dynamics_list(bot, target_id: str, is_group: bool,
         await bot.send_message(**kwargs, message=f"{title} 暂无动态")
         return
 
-    # 按时间倒序排列（最新在前）
-    items_sorted = sorted(items, key=lambda x: int(x.get("timestamp", 0) or 0), reverse=True)
-
-    header = f"📢 {title} 最近动态" if title else "📢 最近动态"
-    lines = [header, ""]
-    for idx, item in enumerate(items_sorted, 1):
-        lines.append(_format_item(idx, item))
-
-    raw_text = "\n".join(lines)
-    final_text = await _ai_summarize(raw_text)
-    await bot.send_message(**kwargs, message=final_text)
+    latest = max(items, key=lambda x: int(x.get("timestamp", 0) or 0))
+    await bot.send_message(
+        **kwargs,
+        message=format_latest_dynamic(latest, title=title),
+    )
+    image_path = await download_image(dynamic_image_url(latest))
+    if image_path:
+        try:
+            await bot.send_message(
+                **kwargs,
+                message=MessageSegment("image", {"file_id": image_path}),
+            )
+        finally:
+            Path(image_path).unlink(missing_ok=True)
 
 
 async def send_dynamic(bot, target_id: str, is_group: bool, item: dict):
@@ -229,21 +322,15 @@ async def send_dynamic(bot, target_id: str, is_group: bool, item: dict):
 
     await bot.send_message(**kwargs, message=msg)
 
-    # 图文类型额外发图片（最多3张）
-    if item.get("type") == "image":
-        pictures = item.get("pictures", [])
-        for pic_url in pictures[:_IMG_MAX]:
-            local_path = await download_image(pic_url)
-            if local_path:
-                try:
-                    await bot.send_message(
-                        **kwargs,
-                        message=MessageSegment("image", {"file_id": local_path}),
-                    )
-                except Exception as e:
-                    logger.warning(f"[BILI] 发送图片失败: {e}")
-                finally:
-                    try:
-                        Path(local_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+    # 每条新动态只附带一张最相关图片；无内容图时使用作者头像兜底。
+    image_path = await download_image(dynamic_image_url(item))
+    if image_path:
+        try:
+            await bot.send_message(
+                **kwargs,
+                message=MessageSegment("image", {"file_id": image_path}),
+            )
+        except Exception as e:
+            logger.warning(f"[BILI] 发送图片失败: {e}")
+        finally:
+            Path(image_path).unlink(missing_ok=True)

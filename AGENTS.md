@@ -77,7 +77,7 @@ AI chat is handled entirely by AstrBot's provider pipeline. The legacy Hermes st
 
 - `jiang_commands` — reuses `news` / `weather` / `epic` / `kfc` / `oilprice` / `bilibili_dynamic` / `help_card`
 - `jiang_douyin` — reuses `douyin/` parser
-- `jiang_image` — reuses `image_generator` / `image_editor`
+- `jiang_image` — runtime-configurable GemAI/OpenAI-compatible/MiniMax image generation with an AstrBot Plugin Page
 - `jiang_mystool` / `jiang_repeater` / `jiang_rocom` / `jiang_schedule` / `jiang_group_notice` — corresponding modules
 
 `data/plugins/_nonebot_stubs.py` shims `nonebot` so NoneBot-style modules can be imported inside AstrBot.
@@ -146,10 +146,13 @@ WeChat user IDs are `wxid_xxx` strings. Wrap `int(m["data"]["qq"])` in try-excep
 - Playable music cards are `<appmsg>` messages with `<type>3</type>`, a playable `<dataurl>`, and `<songalbumurl>` for cover art.
 
 ### Image Generation
-- **Dual backend**: GPT-Image `gpt-image-2` (via the OpenAI-compatible Sub2API configured in `.env.prod`) + MiniMax `image-01` fallback
-- `GPT_IMAGE_BASE_URL` accepts either an API root ending in `/v1` or an unversioned root; the client normalizes both forms
-- Admin command `#切换图片模型 gpt/minimax` to switch backend at runtime
-- Images auto-cleaned from `data/images/` every 2 hours
+- **Default backend**: GemAI `gpt-image-2-2K`
+- Runtime config: `data/plugin_data/jiang_image/models.json` (contains secrets; never expose it in logs or UI responses)
+- WebUI: Plugins → 姜小妹生图 → Pages → 生图模型管理
+- Supports hot-added OpenAI Images, OpenAI Chat image-generation, and MiniMax profiles; saves/default switches apply to the next request without restarting AstrBot
+- Legacy `.env.prod` GPT-Image and MiniMax settings are retained as fallback profiles
+- Admin command `#切换图片模型 <模型ID>` switches an enabled profile
+- Generated images are auto-cleaned according to `retention_hours` (default 2 hours)
 
 ### Video Generation
 Shelved — user's token plan doesn't support video models. Code remains in `video_generator.py`, not initialized.

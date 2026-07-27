@@ -17,6 +17,9 @@ data/plugins/*
 !data/plugins/jiang_server_status/
 !data/plugins/jiang_server_status/**
 data/plugins/jiang_server_status/__pycache__/
+!data/plugins/jiang_video_understanding/
+!data/plugins/jiang_video_understanding/**
+data/plugins/jiang_video_understanding/__pycache__/
 *.dll
 
 # IDE / AI tools
