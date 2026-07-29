@@ -8,7 +8,7 @@ ACCOUNTS = [
         "name": "GemAI",
         "url": "https://api.gemai.cc/api/user/checkin",
         "userId": "183778",
-        "cookie": "session=MTc4MjM3NTg0MXxEWDhFQVFMX2dBQUJFQUVRQUFEX2xQLUFBQVVHYzNSeWFXNW5EQVFBQW1sa0EybHVkQVFGQVAwRm04UUdjM1J5YVc1bkRBb0FDSFZ6WlhKdVlXMWxCbk4wY21sdVp3d0tBQWhETWpBd01qUXhPUVp6ZEhKcGJtY01CZ0FFY205c1pRTnBiblFFQWdBQ0JuTjBjbWx1Wnd3SUFBWnpkR0YwZFhNRGFXNTBCQUlBQWdaemRISnBibWNNQndBRlozSnZkWEFHYzNSeWFXNW5EQWtBQjJSbFptRjFiSFE9fEGluo0tvPkFpo3OGYD46LV4WPeTqfQy8UPedLGEJrff",
+        "cookie": "session=MTc4NDE2NDczOXxEWDhFQVFMX2dBQUJFQUVRQUFEX2xQLUFBQVVHYzNSeWFXNW5EQVlBQkhKdmJHVURhVzUwQkFJQUFnWnpkSEpwYm1jTUNBQUdjM1JoZEhWekEybHVkQVFDQUFJR2MzUnlhVzVuREFjQUJXZHliM1Z3Qm5OMGNtbHVad3dKQUFka1pXWmhkV3gwQm5OMGNtbHVad3dFQUFKcFpBTnBiblFFQlFEOUJadkVCbk4wY21sdVp3d0tBQWgxYzJWeWJtRnRaUVp6ZEhKcGJtY01DZ0FJUXpJd01ESTBNVGs9fBv-B8UeNryH-3ynwHO8WPmXIkqsYfs-hecaeF2wQT_8",
     },
     {
         "name": "FreeAPI (DGBMC)",
@@ -30,12 +30,14 @@ async def checkin_all() -> str:
                 parsed = urlparse(url)
                 headers = {
                     "accept": "application/json, text/plain, */*",
+                    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "cache-control": "no-store",
                     "content-length": "0",
                     "cookie": acct["cookie"],
                     "new-api-user": acct["userId"],
                     "origin": f"{parsed.scheme}://{parsed.hostname}",
-                    "referer": f"{parsed.scheme}://{parsed.hostname}/console/personal",
-                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                    "referer": f"{parsed.scheme}://{parsed.hostname}/profile",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0",
                 }
                 resp = await client.post(url, headers=headers)
                 data = resp.json()

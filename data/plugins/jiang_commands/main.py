@@ -385,9 +385,10 @@ class Main(star.Star):
                 "燕云十六声动态",
                 {"count": 1},
             )
-            chain = [Comp.Plain(text)]
+            chain = []
             if image_path:
                 chain.append(Comp.Image.fromFileSystem(image_path))
+            chain.append(Comp.Plain(text))
             try:
                 yield event.chain_result(chain)
             finally:

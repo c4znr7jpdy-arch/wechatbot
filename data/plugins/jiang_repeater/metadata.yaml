@@ -1,4 +1,4 @@
 name: jiang_repeater
-desc: 复读机插件 — 群内连续两条相同消息自动复读
+desc: 智能复读机 — 仅复读群内连续两条相同的普通聊天
 author: fch
-version: 1.0.1
+version: 1.1.0

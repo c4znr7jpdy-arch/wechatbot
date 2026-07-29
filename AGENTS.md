@@ -138,6 +138,14 @@ group_id = int(session_id) if session_id.isdigit() else session_id
 File: `astrbot_venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py`
 WeChat user IDs are `wxid_xxx` strings. Wrap `int(m["data"]["qq"])` in try-except, skip `get_group_member_info` for non-numeric IDs, use `name` field from message segment instead.
 
+**3. aiocqhttp_message_event.py — meme_manager image metadata preservation**
+File: `astrbot_venv/Lib/site-packages/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py`
+Before converting every `Image` component to base64, recognize both meme_manager layouts:
+`data/plugin_data/meme_manager/memes/` and
+`data/plugin_data/meme_manager/packs/<pack_id>/memes/`. Keep the local file URI
+and add `data.sub_type = "emoji"` so `Py/main.py` routes it through WeChat
+`type=11254` instead of the normal image interface.
+
 ### WeChat Raw XML Send
 
 - DLL API `type=11214` is the CDN raw XML send interface.

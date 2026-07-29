@@ -156,6 +156,27 @@ def _truncate(text: str, limit: int = 100) -> str:
     return text
 
 
+def _compact_summary(text: str, limit: int = 64) -> str:
+    """提取适合微信气泡展示的一句话摘要。"""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+
+    sentence_end = min(
+        (
+            index
+            for mark in "。！？"
+            if (index := text.find(mark)) >= 0
+        ),
+        default=-1,
+    )
+    if 12 <= sentence_end < limit:
+        return text[: sentence_end + 1]
+    if len(text) > limit:
+        return text[:limit].rstrip("，,；;：: ") + "…"
+    return text
+
+
 def _normalize_url(url: str) -> str:
     url = str(url or "").strip()
     if url.startswith("//"):
@@ -191,7 +212,7 @@ def dynamic_link(item: dict) -> str:
 
 
 def format_latest_dynamic(item: dict, title: str = "") -> str:
-    """将最新一条动态格式化成适合微信发送的简洁文本。"""
+    """将最新一条动态格式化成适合放在封面下方的短文案。"""
     dtype = item.get("type", "")
     type_tag = {
         "video": "视频",
@@ -206,23 +227,30 @@ def format_latest_dynamic(item: dict, title: str = "") -> str:
         or ""
     ).strip()
 
-    lines = [f"{title}最新动态" if title else "B站最新动态"]
-    if headline:
-        lines.append(f"[{type_tag}] {headline}")
-        if body and body != headline:
-            lines.append(_truncate(body, 180))
-    else:
-        lines.append(f"[{type_tag}] {_truncate(body or '(无文字内容)', 220)}")
-
     author = str(item.get("author", "") or "").strip()
+    display_title = str(title or "").strip()
+    if author and (
+        not display_title
+        or display_title.startswith("B站用户 ")
+    ):
+        display_title = author
+    display_title = display_title or "B站"
+
+    lines = [f"{display_title}｜最新动态"]
+    if headline:
+        lines.append(f"{type_tag} · {_compact_summary(headline, 56)}")
+        summary = _compact_summary(body, 64)
+        if summary and summary != headline:
+            lines.extend(["", summary])
+    else:
+        lines.append(f"{type_tag} · {_compact_summary(body, 72) or '暂无文字内容'}")
+
     time_str = _ts_to_str(item.get("timestamp", 0))
-    if author:
-        lines.append(f"作者：{author}")
     if time_str:
-        lines.append(f"时间：{time_str}")
+        lines.append(time_str)
     link = dynamic_link(item)
     if link:
-        lines.append(f"链接：{link}")
+        lines.append(f"查看原文：{link}")
     return "\n".join(lines)
 
 

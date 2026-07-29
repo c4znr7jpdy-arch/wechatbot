@@ -46,6 +46,48 @@ PAGE_READWRITE = 0x04
 FILE_MAP_ALL_ACCESS = 0x000F001F
 INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 SHARED_MEM_SIZE = 33  # 明确共享内存大小为33字节
+QUOTED_IMAGE_RETENTION_SECONDS = 3 * 24 * 60 * 60
+QUOTED_IMAGE_CLEANUP_INTERVAL_SECONDS = 60 * 60
+QUOTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _cleanup_quoted_image_cache(
+    cache_dir: str | Path,
+    *,
+    now: float | None = None,
+) -> tuple[int, int]:
+    """删除微信引用图片目录中超过三天的缓存，返回文件数和释放字节数。"""
+    root = Path(cache_dir)
+    if not root.is_dir():
+        return 0, 0
+
+    cutoff = (time.time() if now is None else now) - QUOTED_IMAGE_RETENTION_SECONDS
+    removed = 0
+    freed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        logger.warning(f"[引用图片清理] 无法扫描目录 {root}: {exc}")
+        return 0, 0
+
+    for path in entries:
+        if (
+            not path.is_file()
+            or not path.name.startswith("quoted_")
+            or path.suffix.lower() not in QUOTED_IMAGE_SUFFIXES
+        ):
+            continue
+        try:
+            stat = path.stat()
+            if stat.st_mtime >= cutoff:
+                continue
+            path.unlink()
+            removed += 1
+            freed += stat.st_size
+        except OSError as exc:
+            logger.warning(f"[引用图片清理] 删除失败 {path}: {exc}")
+
+    return removed, freed
 
 
 def _quoted_message_mentions_bot(
@@ -1141,7 +1183,13 @@ class AstrBotWsClient:
         if not isinstance(image_data, str) or not image_data:
             return False
         normalized = image_data.replace("\\", "/").lower()
-        return "/plugin_data/meme_manager/memes/" in normalized
+        plugin_root = "/plugin_data/meme_manager/"
+        if plugin_root not in normalized:
+            return False
+        relative_path = normalized.split(plugin_root, 1)[1]
+        return relative_path.startswith("memes/") or (
+            relative_path.startswith("packs/") and "/memes/" in relative_path
+        )
 
     def _extract_link_card(self, messages) -> dict | None:
         if isinstance(messages, dict):
@@ -1877,6 +1925,35 @@ class WeChatServiceHandler:
         self._forward_record_cache_lock = threading.Lock()
         self._load_forward_record_cache()
         self._filehelper_msgs = []  # 缓存发给文件助手及收到的消息 (最多100条)
+        self._quoted_image_dir = os.path.join(
+            os.path.dirname(__file__), "data", "quoted_images"
+        )
+        self._quoted_image_cleanup_stop = threading.Event()
+        self._cleanup_quoted_images()
+        self._quoted_image_cleanup_thread = threading.Thread(
+            target=self._quoted_image_cleanup_loop,
+            daemon=True,
+            name="quoted-image-cleanup",
+        )
+        self._quoted_image_cleanup_thread.start()
+        logger.info("[引用图片清理] 已启动，保留时间=3天，检查间隔=1小时")
+
+    def _cleanup_quoted_images(self):
+        removed, freed = _cleanup_quoted_image_cache(self._quoted_image_dir)
+        if removed:
+            logger.info(
+                f"[引用图片清理] 删除 {removed} 个过期文件，"
+                f"释放 {freed / 1024 / 1024:.2f} MB"
+            )
+
+    def _quoted_image_cleanup_loop(self):
+        while not self._quoted_image_cleanup_stop.wait(
+            QUOTED_IMAGE_CLEANUP_INTERVAL_SECONDS
+        ):
+            self._cleanup_quoted_images()
+
+    def shutdown(self):
+        self._quoted_image_cleanup_stop.set()
 
     def _cache_filehelper_msg(self, sender: str, content: str, direction: str = "in"):
         """缓存文件助手消息"""
@@ -4247,6 +4324,8 @@ class WeChatService:
         self.is_running = False
 
         try:
+            if self.handler:
+                self.handler.shutdown()
             if self.loader:
                 self.loader.DestroyWeChat()
                 logger.info("微信连接已断开")
