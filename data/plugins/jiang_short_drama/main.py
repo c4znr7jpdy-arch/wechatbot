@@ -16,6 +16,7 @@ from .search import (
     parse_episode_request,
     select_episode,
 )
+from .player_server import ShortDramaPlayerServer
 from .watch_url import build_watch_url
 
 
@@ -71,6 +72,40 @@ class Main(star.Star):
                 self.config.get("min_fuzzy_score"), 3000, 1, 9999
             ),
         )
+        self.player_server = ShortDramaPlayerServer(
+            bind_host=str(
+                self.config.get("episode_player_bind_host") or "127.0.0.1"
+            ),
+            port=_safe_int(
+                self.config.get("episode_player_port"), 6197, 1, 65_535
+            ),
+            public_base_url=self.config.get("episode_player_public_base_url"),
+            token_ttl_seconds=_safe_int(
+                self.config.get("episode_player_token_ttl_minutes"),
+                360,
+                1,
+                1440,
+            )
+            * 60,
+            max_playlists=_safe_int(
+                self.config.get("episode_player_max_playlists"),
+                200,
+                10,
+                2000,
+            ),
+        )
+        configured_base = self.config.get("episode_player_public_base_url")
+        if configured_base and not self.player_server.configured:
+            logger.warning(
+                "[SHORT_DRAMA] episode_player_public_base_url 格式无效，"
+                "分集卡片将使用单集播放器"
+            )
+
+    async def initialize(self) -> None:
+        await self.player_server.start()
+
+    async def terminate(self) -> None:
+        await self.player_server.stop()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def short_drama(self, event: AstrMessageEvent):
@@ -118,8 +153,14 @@ class Main(star.Star):
             )
             return
 
-        watch_url = self._watch_url(result, episode)
-        sent = await self._send_card(event, result, episode, watch_url)
+        watch_url, player_can_select = self._watch_url(result, episode)
+        sent = await self._send_card(
+            event,
+            result,
+            episode,
+            watch_url,
+            player_can_select,
+        )
         if sent:
             logger.info(
                 "[SHORT_DRAMA] card sent title=%r source=%s episodes=%s",
@@ -136,7 +177,15 @@ class Main(star.Star):
             f"点击观看 {episode.name}：{watch_url}"
         )
 
-    def _watch_url(self, result: SearchResult, episode: Episode) -> str:
+    def _watch_url(
+        self,
+        result: SearchResult,
+        episode: Episode,
+    ) -> tuple[str, bool]:
+        playlist_url = self.player_server.create_watch_url(result, episode)
+        if playlist_url:
+            return playlist_url, True
+
         configured = self.config.get("player_url_template")
         watch_url = build_watch_url(result, configured, episode)
         if configured and str(configured).strip() not in {"direct", "DIRECT"}:
@@ -146,7 +195,7 @@ class Main(star.Star):
                 logger.warning(
                     "[SHORT_DRAMA] player_url_template 格式无效，使用默认 HLS 播放页"
                 )
-        return watch_url
+        return watch_url, False
 
     @staticmethod
     def _result_summary(result: SearchResult, episode: Episode) -> str:
@@ -163,13 +212,18 @@ class Main(star.Star):
         result: SearchResult,
         episode: Episode,
         watch_url: str,
+        player_can_select: bool = False,
     ) -> bool:
         summary = Main._result_summary(result, episode)
         title_suffix = "完整版" if result.is_full_version else episode.name
         description = (
             f"{summary} · 点击播放"
             if result.is_full_version
-            else f"{summary} · 可发送“短剧 {result.title} 第N集”选集"
+            else (
+                f"{summary} · 播放器内可选集、上一集、下一集"
+                if player_can_select
+                else f"{summary} · 可发送“短剧 {result.title} 第N集”选集"
+            )
         )
         message = [
             {

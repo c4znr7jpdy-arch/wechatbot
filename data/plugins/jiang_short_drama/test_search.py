@@ -18,6 +18,13 @@ from .search import (
     select_episode,
     title_score,
 )
+from .player_server import (
+    _PLAYER_JAVASCRIPT,
+    _player_html,
+    EpisodePlaylistStore,
+    ShortDramaPlayerServer,
+    validate_public_base_url,
+)
 from .watch_url import build_watch_url
 
 
@@ -193,6 +200,89 @@ class WatchUrlTests(unittest.TestCase):
         url = build_watch_url(result, "", second)
         self.assertIn("%2F2.m3u8", url)
         self.assertNotIn("index.m3u8", url)
+
+
+class EpisodePlayerTests(unittest.TestCase):
+    def setUp(self):
+        self.result = SearchResult(
+            title="测试短剧",
+            source="测试源",
+            episodes=(
+                Episode("第01集", "https://cdn.example/1.m3u8"),
+                Episode("第02集", "https://cdn.example/2.m3u8"),
+            ),
+        )
+
+    def test_public_base_url_validation(self):
+        self.assertEqual(
+            validate_public_base_url("https://player.example/root/"),
+            "https://player.example/root",
+        )
+        self.assertEqual(validate_public_base_url("javascript:alert(1)"), "")
+        self.assertEqual(validate_public_base_url("https://example.com/?x=1"), "")
+
+    def test_playlist_token_expires(self):
+        store = EpisodePlaylistStore(ttl_seconds=60)
+        token = store.put(self.result, now=100)
+        self.assertEqual(store.get(token, now=159).title, "测试短剧")
+        self.assertIsNone(store.get(token, now=160))
+
+    def test_player_url_selects_requested_episode_without_embedding_streams(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        url = server.create_watch_url(self.result, self.result.episodes[1])
+        self.assertIsNotNone(url)
+        self.assertTrue(url.startswith("https://player.example/short-drama/watch/"))
+        self.assertTrue(url.endswith("?ep=2"))
+        self.assertNotIn("m3u8", url)
+
+    def test_single_stream_keeps_existing_player(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        single = SearchResult(
+            title=self.result.title,
+            source=self.result.source,
+            episodes=(self.result.episodes[0],),
+        )
+        self.assertIsNone(server.create_watch_url(single, single.episodes[0]))
+
+    def test_mobile_player_uses_custom_episode_sheet(self):
+        html = _player_html("测试短剧")
+        self.assertNotIn("<select", html)
+        self.assertIn('id="episodeSheet"', html)
+        self.assertIn('id="sheetClose"', html)
+        self.assertIn('id="inlineEpisodeGrid"', html)
+        self.assertIn('id="episodeCount"', html)
+        self.assertIn('aria-label="选择剧集">选集</button>', html)
+        self.assertIn('id="currentEpisode"', html)
+        self.assertIn("repeat(5, minmax(0,1fr))", html)
+        self.assertIn("inlineEpisodeGrid.appendChild", _PLAYER_JAVASCRIPT)
+        self.assertIn("inlineEpisodes.scrollIntoView", _PLAYER_JAVASCRIPT)
+        self.assertIn('aria-label="上一集"', html)
+        self.assertIn('aria-label="下一集"', html)
+
+    def test_quality_and_portrait_adaptation_are_present(self):
+        html = _player_html("测试短剧")
+        self.assertIn('id="qualityButton"', html)
+        self.assertIn('id="videoShell"', html)
+        self.assertIn("hls.levels", _PLAYER_JAVASCRIPT)
+        self.assertIn("video.videoWidth / video.videoHeight", _PLAYER_JAVASCRIPT)
+
+    def test_fullscreen_uses_player_container_and_keeps_episode_controls(self):
+        html = _player_html("测试短剧")
+        self.assertIn('controlslist="nofullscreen nodownload noremoteplayback"', html)
+        self.assertIn('id="fullscreenButton"', html)
+        shell_start = html.index('id="videoShell"')
+        episode_sheet = html.index('id="episodeSheet"')
+        below_player = html.index('class="below-player"')
+        self.assertLess(shell_start, episode_sheet)
+        self.assertLess(episode_sheet, below_player)
+        self.assertIn("videoShell.requestFullscreen", _PLAYER_JAVASCRIPT)
+        self.assertIn("videoShell.classList.contains('pseudo-fullscreen')", _PLAYER_JAVASCRIPT)
 
 
 if __name__ == "__main__":
