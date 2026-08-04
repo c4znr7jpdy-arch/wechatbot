@@ -34,6 +34,10 @@ data/plugins/jiang_video_understanding/__pycache__/
 apihz-toutiao-api-docs
 all.md
 docs/
+!docs/
+docs/*
+!docs/daily/
+!docs/daily/**
 
 # Third-party source clones (already integrated or vendored)
 Douyin_TikTok_Download_API/

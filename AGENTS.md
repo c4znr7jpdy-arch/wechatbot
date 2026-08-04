@@ -183,4 +183,5 @@ User message → #commands → Douyin/Bilibili/TikTok links → Image gen → Vi
 - **memu-bot decisions**: `ignored` means AI chose not to reply (not a service crash); when @-mentioned, must reply (AI judgment issue, not code bug)
 
 ### Daily Report Convention
-At end of each dev session, generate a daily report (`daily-YYYY-MM-DD.md`) summarizing all changes, issues, and fixes.
+At end of each dev session, generate or update the daily report at
+`docs/daily/daily-YYYY-MM-DD.md`, summarizing all changes, issues, and fixes.
