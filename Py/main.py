@@ -1642,6 +1642,32 @@ def _member_identity(info: dict, fallback: dict | None = None) -> dict:
         "remark": str(info.get("remark") or fallback.get("remark") or ""),
     }
 
+def _member_identity_changed(old_entry: dict, new_entry: dict) -> bool:
+    """Compare only fields that should trigger a member-profile notice."""
+    old_identity = _member_identity(old_entry)
+    new_identity = _member_identity(new_entry)
+    return (
+        old_identity["display_name"] != new_identity["display_name"]
+        or old_identity["nickname"] != new_identity["nickname"]
+    )
+
+def _group_member_identity_changes(previous_members: dict, current_members: dict) -> list[tuple[str, dict, dict]]:
+    """Return profile changes for members that existed in both snapshots.
+
+    New and removed members are handled by the dedicated increase/decrease
+    events, so a full 11200 snapshot must not turn those into rename notices.
+    """
+    previous_members = previous_members if isinstance(previous_members, dict) else {}
+    current_members = current_members if isinstance(current_members, dict) else {}
+    changes = []
+    for wxid, new_entry in current_members.items():
+        old_entry = previous_members.get(wxid)
+        if not _has_member_identity(old_entry):
+            continue
+        if _member_identity_changed(old_entry, new_entry):
+            changes.append((str(wxid), old_entry, new_entry))
+    return changes
+
 def _upsert_group_member(room_wxid: str, member: dict) -> None:
     if not room_wxid or not isinstance(member, dict):
         return
@@ -2084,39 +2110,69 @@ class WeChatServiceHandler:
                     f"昵称修改卡片未发送：未拿到成员信息 room={room_wxid}, wxid={wxid}, refreshed={refreshed}"
                 )
                 return
-            old_identity = _member_identity(old_entry)
-            new_identity = _member_identity(cached_entry)
-            if (
-                old_identity["display_name"] == new_identity["display_name"]
-                and old_identity["nickname"] == new_identity["nickname"]
-            ):
+            if not _member_identity_changed(old_entry, cached_entry):
                 logger.info(f"昵称修改卡片未发送：刷新前后无变化 room={room_wxid}, wxid={wxid}")
                 return
             cache_update = dict(cached_entry)
             cache_update["wxid"] = wxid
             _upsert_group_member(room_wxid, cache_update)
             _save_group_member_cache()
-            if not astrbot_ws or not astrbot_ws.is_connected():
-                return
-            event_data = {
-                "time": int(time.time()),
-                "self_id": bot_wxid,
-                "post_type": "notice",
-                "notice_type": "group_member_update",
-                "sub_type": "profile",
-                "group_id": room_wxid,
-                "user_id": wxid,
-                "operator_id": wxid,
-                "wx_old_nickname": old_identity["nickname"],
-                "wx_old_display_name": old_identity["display_name"],
-                "wx_nickname": new_identity["nickname"],
-                "wx_display_name": new_identity["display_name"],
-                "wx_group_name": group_name or "本群",
-                "wx_avatar": new_identity["avatar"],
-            }
-            asyncio.run_coroutine_threadsafe(astrbot_ws.send_event(event_data), astrbot_ws._loop)
+            self._queue_group_member_update_notice(
+                astrbot_ws=astrbot_ws,
+                bot_wxid=bot_wxid,
+                room_wxid=room_wxid,
+                wxid=wxid,
+                group_name=group_name,
+                old_entry=old_entry,
+                new_entry=cached_entry,
+                source="single-member refresh",
+            )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _queue_group_member_update_notice(
+        astrbot_ws,
+        bot_wxid: str,
+        room_wxid: str,
+        wxid: str,
+        group_name: str,
+        old_entry: dict,
+        new_entry: dict,
+        source: str,
+    ) -> bool:
+        if (
+            not astrbot_ws
+            or not astrbot_ws.is_connected()
+            or not getattr(astrbot_ws, "_loop", None)
+            or not _member_identity_changed(old_entry, new_entry)
+        ):
+            return False
+        old_identity = _member_identity(old_entry)
+        new_identity = _member_identity(new_entry)
+        event_data = {
+            "time": int(time.time()),
+            "self_id": bot_wxid,
+            "post_type": "notice",
+            "notice_type": "group_member_update",
+            "sub_type": "profile",
+            "group_id": room_wxid,
+            "user_id": wxid,
+            "operator_id": wxid,
+            "wx_old_nickname": old_identity["nickname"],
+            "wx_old_display_name": old_identity["display_name"],
+            "wx_nickname": new_identity["nickname"],
+            "wx_display_name": new_identity["display_name"],
+            "wx_group_name": group_name or "本群",
+            "wx_avatar": new_identity["avatar"],
+        }
+        asyncio.run_coroutine_threadsafe(astrbot_ws.send_event(event_data), astrbot_ws._loop)
+        logger.info(
+            f"已投递群成员昵称修改通知: room={room_wxid}, wxid={wxid}, source={source}, "
+            f"old={old_identity['display_name'] or old_identity['nickname']!r}, "
+            f"new={new_identity['display_name'] or new_identity['nickname']!r}"
+        )
+        return True
 
     def _send_group_increase_notice_after_refresh(
         self,
@@ -2226,23 +2282,27 @@ class WeChatServiceHandler:
             
             for member in member_list:
                 wxid = member.get("wxid", "")
-                nickname = member.get("nickname", "")
                 invite_by = member.get("invite_by", "")
                 
-                old_entry = _GROUP_MEMBER_CACHE[room_wxid].get(wxid)
-                old_nickname = _member_display_name(old_entry) if isinstance(old_entry, dict) else old_entry
+                old_entry = copy.deepcopy(_GROUP_MEMBER_CACHE[room_wxid].get(wxid, {}))
                 old_avatar = old_entry.get("avatar", "") if isinstance(old_entry, dict) else ""
                 _upsert_group_member(room_wxid, member)
-                member_identity = _member_identity(_GROUP_MEMBER_CACHE[room_wxid].get(wxid), member)
-                new_nickname = _lookup_member_nickname(room_wxid, wxid) or nickname
                 
-                if old_nickname is not None:
-                    # 已经在缓存中，说明仅仅是改名
-                    if old_nickname != nickname:
-                        msg = f"系统通知：群成员 {old_nickname} (WxID: {wxid}) 偷偷把群昵称改成了 {nickname}"
-                        if astrbot_ws and astrbot_ws.send_text_fn:
-                            astrbot_ws.send_text_fn(to_wxid=room_wxid, content=msg)
-                    self._request_group_member_refresh(room_wxid, "11098 member profile update")
+                if _has_member_identity(old_entry):
+                    # 不同微信/DLL版本可能用 11098 或 11200 上报改名。
+                    # 两条路径统一生成 OneBot notice，由 AstrBot 插件发送卡片。
+                    if astrbot_ws and astrbot_ws.is_connected():
+                        self._send_group_member_update_notice_after_refresh(
+                            astrbot_ws=astrbot_ws,
+                            bot_wxid=bot_wxid,
+                            room_wxid=room_wxid,
+                            wxid=wxid,
+                            group_name=group_name,
+                            old_entry=old_entry,
+                            fallback_member=member,
+                        )
+                    else:
+                        self._request_group_member_refresh(room_wxid, "11098 member profile update")
                 else:
                     # 新人入群
                     if astrbot_ws and astrbot_ws.is_connected():
@@ -2260,14 +2320,42 @@ class WeChatServiceHandler:
         
         elif message_type == 11200:
             # 11200 既可能是入群时的全量成员快照，也可能是单成员资料变更。
-            # 先用全量快照建立当前基线，不能把初始化资料补全误报成历史改名。
+            # 全量快照也可能由改名触发，已有基线时必须先做差异检测，
+            # 不能直接覆盖缓存后返回。
             room_wxid = self._extract_room_wxid(data)
             member_list = data.get("member_list")
             if isinstance(member_list, list) and len(member_list) > 1:
+                previous_members = copy.deepcopy(_GROUP_MEMBER_CACHE.get(room_wxid, {}))
                 cached_room, member_count = _cache_group_members(data)
-                logger.info(
-                    f"[11200] 已建立群成员基线: room={cached_room or room_wxid}, members={member_count}"
-                )
+                effective_room = cached_room or room_wxid
+                current_members = _GROUP_MEMBER_CACHE.get(effective_room, {})
+                changes = _group_member_identity_changes(previous_members, current_members)
+                if changes:
+                    astrbot_ws = get_astrbot_ws_client()
+                    bot_wxid = astrbot_ws._bot_wxid if astrbot_ws else ""
+                    group_name = str(data.get("nickname", "") or data.get("group_name", "") or "")
+                    queued = 0
+                    for wxid, old_entry, new_entry in changes:
+                        if self._queue_group_member_update_notice(
+                            astrbot_ws=astrbot_ws,
+                            bot_wxid=bot_wxid,
+                            room_wxid=effective_room,
+                            wxid=wxid,
+                            group_name=group_name,
+                            old_entry=old_entry,
+                            new_entry=new_entry,
+                            source="11200 full snapshot diff",
+                        ):
+                            queued += 1
+                    logger.info(
+                        f"[11200] 全量快照差异: room={effective_room}, members={member_count}, "
+                        f"changes={len(changes)}, queued={queued}"
+                    )
+                else:
+                    logger.info(
+                        f"[11200] 已更新群成员基线: room={effective_room}, "
+                        f"members={member_count}, changes=0"
+                    )
                 return
 
             member_wxid = self._extract_member_wxid(data, room_wxid)
