@@ -1,0 +1,32 @@
+{
+  "request_timeout_seconds": {
+    "description": "单个资源站请求超时（秒）",
+    "type": "float",
+    "default": 10
+  },
+  "max_concurrent_sources": {
+    "description": "同时查询的资源站数量，建议 3-5",
+    "type": "int",
+    "default": 4
+  },
+  "cache_ttl_minutes": {
+    "description": "搜索结果内存缓存时间（分钟），0 表示不缓存",
+    "type": "int",
+    "default": 360
+  },
+  "full_version_min_minutes": {
+    "description": "单线路达到该时长才识别为完整版（分钟）",
+    "type": "float",
+    "default": 30
+  },
+  "min_fuzzy_score": {
+    "description": "精准同名无结果时启用模糊匹配的最低分，建议保持 3000",
+    "type": "int",
+    "default": 3000
+  },
+  "player_url_template": {
+    "description": "播放器地址模板；支持 {url}、{title}、{episode}。留空使用微信兼容播放页，填 direct 才直达 m3u8",
+    "type": "string",
+    "default": "https://m3u8-player.cc/player?url={url}"
+  }
+}
