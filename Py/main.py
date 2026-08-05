@@ -2247,12 +2247,30 @@ class WeChatServiceHandler:
         def worker():
             refreshed = self._refresh_group_members_sync(room_wxid, "group increase card", timeout=2.0)
             cached_entry = _GROUP_MEMBER_CACHE.get(room_wxid, {}).get(wxid, {})
-            if not refreshed or not cached_entry:
+            if _has_member_identity(cached_entry):
+                member_identity = _member_identity(cached_entry, fallback_member)
+            elif _has_member_identity(fallback_member):
+                # 11032 can briefly return the pre-join member snapshot even
+                # though the authoritative 11098 increase event already
+                # contains the new member. Preserve that event identity so the
+                # welcome card is not silently dropped during this race.
+                member_identity = _member_identity(fallback_member)
+                cache_update = dict(fallback_member)
+                cache_update["wxid"] = wxid
+                if fallback_avatar and not _member_avatar(cache_update):
+                    cache_update["avatar"] = fallback_avatar
+                _upsert_group_member(room_wxid, cache_update)
+                _save_group_member_cache()
+                logger.info(
+                    f"入群卡片使用 11098 事件资料回退: room={room_wxid}, wxid={wxid}, "
+                    f"refreshed={refreshed}"
+                )
+            else:
                 logger.warning(
-                    f"入群卡片未发送：未拿到 11032 成员信息 room={room_wxid}, wxid={wxid}, refreshed={refreshed}"
+                    f"入群卡片未发送：11032 与入群事件均无成员资料 "
+                    f"room={room_wxid}, wxid={wxid}, refreshed={refreshed}"
                 )
                 return
-            member_identity = _member_identity(cached_entry, fallback_member)
             if not astrbot_ws or not astrbot_ws.is_connected():
                 return
             event_data = {

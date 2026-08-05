@@ -198,6 +198,54 @@ class GroupMemberNoticeTests(unittest.TestCase):
         self.assertEqual(queued[0]["new_entry"]["display_name"], "新群昵称")
         self.assertEqual(queued[0]["source"], "11200 full snapshot diff")
 
+    def test_group_increase_uses_event_identity_when_11032_snapshot_is_stale(self):
+        room = "56594698995@chatroom"
+        target = "wxid_new"
+        handler = object.__new__(wechat_bridge.WeChatServiceHandler)
+        handler._refresh_group_members_sync = lambda *args, **kwargs: True
+        sent_events = []
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        fake_ws = mock.Mock()
+        fake_ws._loop = object()
+        fake_ws.is_connected.return_value = True
+        fake_ws.send_event.side_effect = lambda event: sent_events.append(event) or object()
+
+        with (
+            mock.patch.object(wechat_bridge.threading, "Thread", ImmediateThread),
+            mock.patch.object(wechat_bridge.asyncio, "run_coroutine_threadsafe"),
+        ):
+            handler._send_group_increase_notice_after_refresh(
+                astrbot_ws=fake_ws,
+                bot_wxid="wxid_bot",
+                room_wxid=room,
+                wxid=target,
+                invite_by="wxid_inviter",
+                group_name="测试群",
+                fallback_member={
+                    "wxid": target,
+                    "nickname": "刚入群",
+                    "display_name": "",
+                },
+                fallback_avatar="https://example.test/avatar.jpg",
+            )
+
+        self.assertEqual(len(sent_events), 1)
+        self.assertEqual(sent_events[0]["notice_type"], "group_increase")
+        self.assertEqual(sent_events[0]["user_id"], target)
+        self.assertEqual(sent_events[0]["wx_nickname"], "刚入群")
+        self.assertEqual(sent_events[0]["wx_avatar"], "https://example.test/avatar.jpg")
+        self.assertEqual(
+            wechat_bridge._GROUP_MEMBER_CACHE[room][target]["nickname"],
+            "刚入群",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
