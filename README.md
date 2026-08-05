@@ -21,7 +21,7 @@
 
 | 功能 | 触发方式 | 后端 |
 |------|---------|------|
-| 文生图 | "生成/画一张xxx" | GemAI `gpt-image-2-2K`（默认）+ 可配置回退 |
+| 文生图 | "生成/画一张xxx" | HostCentral `gpt-image-2`（首选）+ 自动回退 |
 | 图生图 | 引用图片 + "P图/改图" | GemAI / OpenAI 兼容 / MiniMax |
 | 视频生成 | "生成视频xxx" | MiniMax Hailuo |
 | 语音合成 | `#语音 <文本>` | Edge TTS（6 种音色） |
@@ -307,9 +307,11 @@ HTTP_PROXY=http://127.0.0.1:7890
 
 ### 生图模型 WebUI
 
-`jiang_image` 的默认运行配置保存在 `data/plugin_data/jiang_image/models.json`，默认使用 GemAI `gpt-image-2-2K`。进入 AstrBot WebUI：
+`jiang_image` 的默认运行配置保存在 `data/plugin_data/jiang_image/models.json`，首选 HostCentral `gpt-image-2`，不可访问或生成失败时按优先级自动回退到其他已启用模型。进入 AstrBot WebUI：
 
 `插件 → 姜小妹生图 → Pages → 生图模型管理`
+
+插件卡片的“配置”入口还支持直接设置首选、次选和第三顺位的 Base URL、模型名及备用开关；API Key 来源和高级参数仍可在“生图模型管理”页面维护。
 
 可新增、修改、停用、删除和测试 OpenAI Images、OpenAI Chat 生图及 MiniMax 模型，也可设置默认模型与自动回退顺序。所有保存和默认模型切换都会立即热更新，不需要重启 AstrBot。API Key 只保存在后端，页面仅显示掩码。
 

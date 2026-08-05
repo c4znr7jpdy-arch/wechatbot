@@ -244,12 +244,18 @@ def _sports_replay_sort_key(title: str) -> str:
     return max(dates) if dates else ""
 
 
-def _short_drama_type_ids(classes: Iterable[dict[str, Any]]) -> set[str]:
+def _media_type_ids(
+    classes: Iterable[dict[str, Any]],
+    media_type: str,
+) -> set[str]:
     rows = [row for row in classes if isinstance(row, dict)]
     selected = {
         str(row.get("type_id"))
         for row in rows
-        if _SHORT_DRAMA_TYPE_RE.search(str(row.get("type_name") or ""))
+        if _is_recommendation_category(
+            media_type,
+            str(row.get("type_name") or ""),
+        )
     }
     while True:
         descendants = {
@@ -263,19 +269,33 @@ def _short_drama_type_ids(classes: Iterable[dict[str, Any]]) -> set[str]:
         selected = expanded
 
 
+def _is_recommendation_category(media_type: str, category: str) -> bool:
+    if media_type == "体育":
+        return is_sports_category(category)
+    return is_media_category(media_type, category)
+
+
 def recommendation_candidates(
     payload: dict[str, Any],
     source_name: str,
+    media_type: str | None = "短剧",
 ) -> list[Recommendation]:
-    """从资源站列表中提取有 HLS 播放地址的短剧，并保留更新时间。"""
-    type_ids = _short_drama_type_ids(payload.get("class") or ())
+    """提取指定分类中有 HLS 播放地址的最新资源并保留更新时间。"""
+    type_ids = (
+        _media_type_ids(payload.get("class") or (), media_type)
+        if media_type
+        else set()
+    )
     candidates: list[Recommendation] = []
     for item in payload.get("list") or ():
         if not isinstance(item, dict):
             continue
         type_name = str(item.get("type_name") or "")
         type_id = str(item.get("type_id") or "")
-        if type_id not in type_ids and not _SHORT_DRAMA_TYPE_RE.search(type_name):
+        if media_type and type_id not in type_ids and not _is_recommendation_category(
+            media_type,
+            type_name,
+        ):
             continue
         result = _result_from_item(item, source_name, EXACT_TITLE_SCORE)
         if result is None:
@@ -666,9 +686,10 @@ class ShortDramaSearcher:
             str,
             tuple[float, SearchResult | None],
         ] = {}
-        self._recommendation_cache: (
-            tuple[float, tuple[SearchResult, ...]] | None
-        ) = None
+        self._recommendation_cache: dict[
+            str,
+            tuple[float, tuple[SearchResult, ...]],
+        ] = {}
 
     async def search_sports_replay(self, query: str) -> SearchResult | None:
         """只返回标题完全一致且分类为体育赛事的可播放结果。"""
@@ -966,10 +987,16 @@ class ShortDramaSearcher:
         }
         self._variant_cache[cache_key] = (now + 10 * 60, variants)
 
-    async def recommend_results(self, limit: int = 12) -> tuple[SearchResult, ...]:
-        """返回资源站最近更新且可直接播放的短剧结果。"""
+    async def recommend_results(
+        self,
+        limit: int = 12,
+        *,
+        media_type: str | None = "短剧",
+    ) -> tuple[SearchResult, ...]:
+        """返回资源站最近更新且可直接播放的指定分类结果。"""
         wanted = max(1, min(int(limit), 50))
-        cached = self._recommendation_cache
+        cache_key = media_type or "*"
+        cached = self._recommendation_cache.get(cache_key)
         if cached and cached[0] > time.monotonic() and len(cached[1]) >= wanted:
             return cached[1][:wanted]
 
@@ -999,6 +1026,7 @@ class ShortDramaSearcher:
                             semaphore,
                             source,
                             page,
+                            media_type,
                         )
                         for source in self.sources
                     )
@@ -1030,9 +1058,16 @@ class ShortDramaSearcher:
                 reverse=True,
             )[:wanted]
         )
-        self._recommendation_cache = (time.monotonic() + 10 * 60, ordered)
+        now = time.monotonic()
+        self._recommendation_cache = {
+            key: value
+            for key, value in self._recommendation_cache.items()
+            if value[0] > now
+        }
+        self._recommendation_cache[cache_key] = (now + 10 * 60, ordered)
         logger.info(
-            "[SHORT_DRAMA] recommendations selected=%s candidates=%s",
+            "[SHORT_DRAMA] recommendations media=%s selected=%s candidates=%s",
+            media_type or "all",
             len(ordered),
             len(candidates),
         )
@@ -1398,6 +1433,7 @@ class ShortDramaSearcher:
         semaphore: asyncio.Semaphore,
         source: Source,
         page: int,
+        media_type: str | None,
     ) -> list[Recommendation]:
         try:
             async with semaphore:
@@ -1417,7 +1453,11 @@ class ShortDramaSearcher:
                     raw = await response.read()
                     if len(raw) > 5_000_000:
                         return []
-            return recommendation_candidates(_decode_json(raw), source.name)
+            return recommendation_candidates(
+                _decode_json(raw),
+                source.name,
+                media_type,
+            )
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
             logger.info(
                 "[SHORT_DRAMA] recommendation source=%s unavailable: %s: %s",

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .main import (
+    Main,
     _compact_play_card_text,
     _compact_variants_card_text,
+    _first_recommendation_cover,
     _media_help_text,
 )
 from .search import (
@@ -53,9 +57,50 @@ from .player_server import (
     validate_public_base_url,
 )
 from .watch_url import build_watch_url
+from .schedule_store import (
+    RecommendationScheduleStore,
+    ScheduleConfigError,
+    task_cron_expression,
+    validate_task,
+)
 
 
 class CommandMatchTests(unittest.TestCase):
+    def test_recommendation_cover_uses_first_item_only(self):
+        first = SearchResult(
+            title="第一部",
+            source="测试源",
+            cover_url="https://img.example/first.webp",
+            episodes=(Episode("正片", "https://cdn.example/first.m3u8"),),
+        )
+        second = SearchResult(
+            title="第二部",
+            source="测试源",
+            cover_url="https://img.example/second.jpg",
+            episodes=(Episode("正片", "https://cdn.example/second.m3u8"),),
+        )
+        self.assertEqual(
+            _first_recommendation_cover((first, second)),
+            first.cover_url,
+        )
+
+    def test_recommendation_cover_does_not_borrow_second_item(self):
+        first = SearchResult(
+            title="第一部",
+            source="测试源",
+            episodes=(Episode("正片", "https://cdn.example/first.m3u8"),),
+        )
+        second = SearchResult(
+            title="第二部",
+            source="测试源",
+            cover_url="https://img.example/second.jpg",
+            episodes=(Episode("正片", "https://cdn.example/second.m3u8"),),
+        )
+        self.assertEqual(
+            _first_recommendation_cover((first, second)),
+            "https://duanjubaike.cn/favicon.ico",
+        )
+
     def test_requires_ascii_space_and_full_match(self):
         self.assertEqual(extract_query("短剧 闪婚"), "闪婚")
         self.assertEqual(extract_query("短剧   闪婚后   "), "闪婚后")
@@ -378,6 +423,39 @@ class PlayUrlTests(unittest.TestCase):
         self.assertEqual(len(candidates[0].result.episodes), 1)
         self.assertEqual(candidates[1].result.category, "AI漫剧")
 
+    def test_recommendations_can_filter_another_media_category(self):
+        payload = {
+            "class": [
+                {"type_id": 1, "type_pid": 0, "type_name": "短剧"},
+                {"type_id": 2, "type_pid": 0, "type_name": "电影片"},
+                {"type_id": 3, "type_pid": 0, "type_name": "足球"},
+            ],
+            "list": [
+                {
+                    "vod_name": "短剧作品",
+                    "type_id": 1,
+                    "type_name": "短剧",
+                    "vod_play_url": "正片$https://example.com/short.m3u8",
+                },
+                {
+                    "vod_name": "电影作品",
+                    "type_id": 2,
+                    "type_name": "动作片",
+                    "vod_play_url": "正片$https://example.com/movie.m3u8",
+                },
+                {
+                    "vod_name": "足球回放",
+                    "type_id": 3,
+                    "type_name": "足球",
+                    "vod_play_url": "正片$https://example.com/sports.m3u8",
+                },
+            ],
+        }
+        candidates = recommendation_candidates(payload, "测试源", "电影")
+        self.assertEqual([item.title for item in candidates], ["电影作品"])
+        sports = recommendation_candidates(payload, "测试源", "体育")
+        self.assertEqual([item.title for item in sports], ["足球回放"])
+
     def test_selects_longest_hls_route(self):
         value = (
             "正片$https://example.com/video.mp4$$$"
@@ -665,6 +743,18 @@ class EpisodePlayerTests(unittest.TestCase):
         self.assertTrue(url.endswith("?ep=2"))
         self.assertNotIn("m3u8", url)
 
+    def test_player_url_can_force_explicit_episode(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        url = server.create_watch_url(
+            self.result,
+            self.result.episodes[1],
+            force_episode=True,
+        )
+        self.assertTrue(url.endswith("?ep=2&force=1"))
+
     def test_single_stream_keeps_existing_player(self):
         server = ShortDramaPlayerServer(
             public_base_url="https://player.example",
@@ -724,6 +814,20 @@ class EpisodePlayerTests(unittest.TestCase):
             url.startswith("https://player.example/short-drama/recommendations/")
         )
         self.assertNotIn("m3u8", url)
+
+    def test_card_cover_url_hides_first_cover_behind_jpeg_token(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        source_url = "https://img.example/first.webp"
+        url = server.create_card_cover_url(source_url)
+        self.assertIsNotNone(url)
+        self.assertTrue(url.startswith("https://player.example/short-drama/cover/"))
+        self.assertTrue(url.endswith(".jpg"))
+        self.assertNotIn(source_url, url)
+        token = url.rsplit("/", 1)[-1].removesuffix(".jpg")
+        self.assertEqual(server.cover_store.get(token).source_url, source_url)
 
     def test_variant_page_shows_covers_metadata_and_choice_links(self):
         live_action = SearchResult(
@@ -807,10 +911,52 @@ class EpisodePlayerTests(unittest.TestCase):
         self.assertIn("hls.levels", _PLAYER_JAVASCRIPT)
         self.assertIn("video.videoWidth / video.videoHeight", _PLAYER_JAVASCRIPT)
 
+    def test_player_supports_hold_for_temporary_double_speed(self):
+        html = _player_html("测试短剧")
+        self.assertIn('id="holdSpeedHint"', html)
+        self.assertIn('hidden>2×</div>', html)
+        self.assertNotIn("2× 倍速播放", html)
+        self.assertIn("video.addEventListener('pointerdown', startHoldSpeed)", _PLAYER_JAVASCRIPT)
+        self.assertIn("video.playbackRate = 2", _PLAYER_JAVASCRIPT)
+        self.assertIn("video.playbackRate = holdSpeedOriginalRate", _PLAYER_JAVASCRIPT)
+        self.assertIn("nativeControlsHeight", _PLAYER_JAVASCRIPT)
+        self.assertIn("350", _PLAYER_JAVASCRIPT)
+        self.assertIn("showHoldSpeedHint", _PLAYER_JAVASCRIPT)
+        self.assertIn("1200", _PLAYER_JAVASCRIPT)
+
+    def test_player_stage_centers_in_mobile_visual_viewport(self):
+        html = _player_html("测试短剧")
+        self.assertIn('class="watch-stage"', html)
+        self.assertIn("justify-content: center", html)
+        self.assertIn("--player-viewport-height", html)
+        self.assertNotIn(".watch-stage {{ display: block", html)
+        self.assertIn("window.visualViewport?.height", _PLAYER_JAVASCRIPT)
+        self.assertIn(
+            "window.visualViewport?.addEventListener('resize', updatePlayerViewportHeight)",
+            _PLAYER_JAVASCRIPT,
+        )
+
+    def test_player_persists_history_across_playlist_tokens(self):
+        self.assertIn("stableMediaId(body)", _PLAYER_JAVASCRIPT)
+        self.assertIn("body.title, body.source, body.cover", _PLAYER_JAVASCRIPT)
+        self.assertIn("short-drama:history:${mediaStorageId}", _PLAYER_JAVASCRIPT)
+        self.assertIn("migrateLegacyHistory", _PLAYER_JAVASCRIPT)
+        self.assertIn("pagehide", _PLAYER_JAVASCRIPT)
+        self.assertIn("visibilitychange", _PLAYER_JAVASCRIPT)
+        self.assertIn("video.addEventListener('seeked', saveCurrentProgress)", _PLAYER_JAVASCRIPT)
+        self.assertIn("storageRemove(progressKey(current))", _PLAYER_JAVASCRIPT)
+
+    def test_player_prefers_saved_episode_unless_url_forces_one(self):
+        self.assertIn("searchParams.get('force') === '1'", _PLAYER_JAVASCRIPT)
+        self.assertIn("forced && hasRequested", _PLAYER_JAVASCRIPT)
+        self.assertIn("hasSaved ? saved", _PLAYER_JAVASCRIPT)
+
     def test_fullscreen_uses_player_container_and_keeps_episode_controls(self):
         html = _player_html("测试短剧")
         self.assertIn('controlslist="nofullscreen nodownload noremoteplayback"', html)
         self.assertIn('id="fullscreenButton"', html)
+        self.assertIn('class="top-right-actions"', html)
+        self.assertNotIn("bottom: 54px", html)
         shell_start = html.index('id="videoShell"')
         episode_sheet = html.index('id="episodeSheet"')
         below_player = html.index('class="below-player"')
@@ -853,6 +999,111 @@ class CollectionPlayerAsyncTests(unittest.IsolatedAsyncioTestCase):
         server.collection_loader = loader
         loaded = await server._load_collection_page(record, 2)
         self.assertEqual([item.title for item in loaded.items], [next_item.title])
+
+    async def test_scheduled_recommendation_sends_share_to_exact_umo(self):
+        result = SearchResult(
+            title="测试短剧",
+            source="测试源",
+            cover_url="https://example.com/cover.jpg",
+            episodes=(Episode("正片", "https://example.com/play.m3u8"),),
+        )
+
+        class FakeSearcher:
+            async def recommend_results(self, limit, *, media_type):
+                self.request = (limit, media_type)
+                return (result,)
+
+        class FakePlayer:
+            def create_recommendations_url(self, recommendations, heading):
+                self.request = (recommendations, heading)
+                return "https://player.example/recommendations/test"
+
+            def create_card_cover_url(self, source_url):
+                self.cover_request = source_url
+                return "https://player.example/cover/first.jpg"
+
+        class FakeContext:
+            async def send_message(self, session, chain):
+                self.request = (session, chain)
+                return True
+
+        plugin = object.__new__(Main)
+        plugin.searcher = FakeSearcher()
+        plugin.player_server = FakePlayer()
+        plugin.context = FakeContext()
+        response = await plugin._send_scheduled_recommendations(
+            {
+                "id": "abcdef123456",
+                "session": "aiocqhttp:GroupMessage:51632940287@chatroom",
+                "media_type": "短剧",
+                "limit": 12,
+            }
+        )
+        self.assertTrue(response["sent"])
+        self.assertEqual(plugin.searcher.request, (12, "短剧"))
+        session, chain = plugin.context.request
+        self.assertEqual(
+            session,
+            "aiocqhttp:GroupMessage:51632940287@chatroom",
+        )
+        segment = chain.chain[0]
+        self.assertEqual(segment.type.value, "Share")
+        self.assertIn("最新短剧推荐", segment.title)
+        self.assertEqual(plugin.player_server.cover_request, result.cover_url)
+        self.assertEqual(
+            segment.image,
+            "https://player.example/cover/first.jpg",
+        )
+
+
+class RecommendationScheduleStoreTests(unittest.TestCase):
+    def test_validates_group_umo_and_builds_weekly_cron(self):
+        task = validate_task(
+            {
+                "name": "周末电影推荐",
+                "session": "aiocqhttp:GroupMessage:51632940287@chatroom",
+                "media_type": "电影",
+                "hour": 20,
+                "minute": 30,
+                "days": ["sat", "sun"],
+                "limit": 12,
+                "enabled": True,
+            }
+        )
+        self.assertEqual(task_cron_expression(task), "30 20 * * sat,sun")
+        self.assertEqual(len(task["id"]), 12)
+
+    def test_rejects_private_message_umo(self):
+        with self.assertRaises(ScheduleConfigError):
+            validate_task(
+                {
+                    "session": "aiocqhttp:FriendMessage:wxid_test",
+                    "media_type": "短剧",
+                }
+            )
+
+    def test_store_upserts_and_deletes_tasks(self):
+        with TemporaryDirectory() as temp_dir:
+            store = RecommendationScheduleStore(Path(temp_dir) / "tasks.json")
+            saved = store.upsert(
+                {
+                    "name": "动漫推荐",
+                    "session": "aiocqhttp:GroupMessage:51632940287@chatroom",
+                    "media_type": "动漫",
+                    "hour": 18,
+                    "minute": 5,
+                    "days": [],
+                    "limit": 8,
+                    "enabled": False,
+                }
+            )
+            self.assertEqual(len(store.load()), 1)
+            self.assertEqual(task_cron_expression(saved), "5 18 * * *")
+            saved["enabled"] = True
+            updated = store.upsert(saved)
+            self.assertTrue(updated["enabled"])
+            self.assertTrue(store.delete(saved["id"]))
+            self.assertEqual(store.load(), [])
 
 
 if __name__ == "__main__":

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
 import time
 from dataclasses import dataclass
 from html import escape
+from io import BytesIO
 from typing import Awaitable, Callable
 from urllib.parse import quote, urlencode, urlsplit
 
+import aiohttp
 from aiohttp import web
+from PIL import Image
 
 from .search import CollectionPage, Episode, SearchResult, normalize_title
 
@@ -41,6 +45,13 @@ class CollectionRecord:
     query_title: str
     pages: dict[int, CollectionPage]
     expires_at: float
+
+
+@dataclass(slots=True)
+class CardCoverRecord:
+    source_url: str
+    expires_at: float
+    jpeg_data: bytes | None = None
 
 
 class EpisodePlaylistStore:
@@ -170,6 +181,43 @@ class CollectionStore:
             self._items.pop(key, None)
 
 
+class CardCoverStore:
+    """Keep first-item recommendation covers behind short-lived JPEG URLs."""
+
+    def __init__(self, ttl_seconds: int = 21_600, max_entries: int = 200) -> None:
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.max_entries = max(10, int(max_entries))
+        self._items: dict[str, CardCoverRecord] = {}
+
+    def put(self, source_url: str, now: float | None = None) -> str:
+        current = time.monotonic() if now is None else now
+        self._purge(current)
+        while len(self._items) >= self.max_entries:
+            oldest = min(self._items, key=lambda key: self._items[key].expires_at)
+            self._items.pop(oldest, None)
+        token = secrets.token_urlsafe(12)
+        self._items[token] = CardCoverRecord(
+            source_url=source_url,
+            expires_at=current + self.ttl_seconds,
+        )
+        return token
+
+    def get(self, token: str, now: float | None = None) -> CardCoverRecord | None:
+        current = time.monotonic() if now is None else now
+        record = self._items.get(token)
+        if record is None:
+            return None
+        if record.expires_at <= current:
+            self._items.pop(token, None)
+            return None
+        return record
+
+    def _purge(self, now: float) -> None:
+        expired = [key for key, value in self._items.items() if value.expires_at <= now]
+        for key in expired:
+            self._items.pop(key, None)
+
+
 def validate_public_base_url(value: object) -> str:
     """Return a usable public origin/base path or an empty string."""
     text = str(value or "").strip().rstrip("/")
@@ -199,6 +247,7 @@ class ShortDramaPlayerServer:
         self.store = EpisodePlaylistStore(token_ttl_seconds, max_playlists)
         self.variant_store = VariantStore(token_ttl_seconds, max_playlists)
         self.collection_store = CollectionStore(token_ttl_seconds, max_playlists)
+        self.cover_store = CardCoverStore(token_ttl_seconds, max_playlists)
         self.collection_loader: (
             Callable[[str, int], Awaitable[CollectionPage]] | None
         ) = None
@@ -228,6 +277,10 @@ class ShortDramaPlayerServer:
         app.router.add_get(
             f"{_ROUTE_PREFIX}/recommendations/{{token}}",
             self._handle_recommendations,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/cover/{{token}}.jpg",
+            self._handle_card_cover,
         )
         app.router.add_get(
             f"{_ROUTE_PREFIX}/collection/{{token}}",
@@ -288,6 +341,8 @@ class ShortDramaPlayerServer:
         self,
         result: SearchResult,
         selected: Episode,
+        *,
+        force_episode: bool = False,
     ) -> str | None:
         if not self.started or not self.public_base_url or len(result.episodes) <= 1:
             return None
@@ -296,7 +351,10 @@ class ShortDramaPlayerServer:
         except ValueError:
             selected_index = 0
         token = self.store.put(result)
-        query = urlencode({"ep": selected_index + 1})
+        query_params = {"ep": selected_index + 1}
+        if force_episode:
+            query_params["force"] = 1
+        query = urlencode(query_params)
         return (
             f"{self.public_base_url}{_ROUTE_PREFIX}/watch/{token}?{query}"
         )
@@ -332,16 +390,72 @@ class ShortDramaPlayerServer:
     def create_recommendations_url(
         self,
         recommendations: tuple[SearchResult, ...],
+        heading: str = "最新短剧推荐",
     ) -> str | None:
         if not self.started or not self.public_base_url or not recommendations:
             return None
-        token = self.variant_store.put("最新短剧推荐", recommendations)
+        token = self.variant_store.put(heading, recommendations)
         return f"{self.public_base_url}{_ROUTE_PREFIX}/recommendations/{token}"
+
+    def create_card_cover_url(self, source_url: str) -> str | None:
+        if not self.started or not self.public_base_url:
+            return None
+        parsed = urlsplit(str(source_url or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        token = self.cover_store.put(source_url)
+        return f"{self.public_base_url}{_ROUTE_PREFIX}/cover/{token}.jpg"
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": True, "plugin": "jiang_short_drama", "player": True},
             headers={"Cache-Control": "no-store"},
+        )
+
+    async def _handle_card_cover(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.cover_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="封面链接已失效")
+        if record.jpeg_data is None:
+            timeout = aiohttp.ClientTimeout(total=12, connect=5)
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/137.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=timeout,
+                    headers=headers,
+                    trust_env=False,
+                ) as session:
+                    async with session.get(
+                        record.source_url,
+                        allow_redirects=True,
+                    ) as response:
+                        if response.status != 200:
+                            raise web.HTTPBadGateway(text="上游封面读取失败")
+                        raw = await response.read()
+                        if not raw or len(raw) > 5_000_000:
+                            raise web.HTTPBadGateway(text="上游封面大小异常")
+                with Image.open(BytesIO(raw)) as source_image:
+                    image = source_image.convert("RGB")
+                    image.thumbnail((720, 720), Image.Resampling.LANCZOS)
+                    output = BytesIO()
+                    image.save(output, format="JPEG", quality=88, optimize=True)
+                    record.jpeg_data = output.getvalue()
+            except web.HTTPException:
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+                logger.exception("[SHORT_DRAMA] recommendation cover conversion failed")
+                raise web.HTTPBadGateway(text="封面转换失败")
+        return web.Response(
+            body=record.jpeg_data,
+            content_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=21600"},
         )
 
     async def _handle_watch(self, request: web.Request) -> web.Response:
@@ -658,6 +772,7 @@ def _variant_html(record: VariantRecord, token: str) -> str:
 
 def _recommendation_html(record: VariantRecord, token: str) -> str:
     safe_token = quote(token, safe="")
+    safe_heading = escape(record.query_title or "最新资源推荐")
     cards: list[str] = []
     for index, result in enumerate(record.variants, start=1):
         title = escape(result.title or "短剧")
@@ -698,7 +813,7 @@ def _recommendation_html(record: VariantRecord, token: str) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>最新短剧推荐</title>
+  <title>{safe_heading}</title>
   <style>
     :root {{ color-scheme:dark; font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; --accent:#20c5a5; }}
     * {{ box-sizing:border-box; }}
@@ -731,9 +846,9 @@ def _recommendation_html(record: VariantRecord, token: str) -> str:
 </head>
 <body>
   <main>
-    <header><h1>最新短剧推荐</h1><p>共 {len(record.variants)} 部，按资源站更新时间排序</p></header>
+    <header><h1>{safe_heading}</h1><p>共 {len(record.variants)} 部，按资源站更新时间排序</p></header>
     <section class="grid">{''.join(cards)}</section>
-    <p class="tip">点击任一短剧即可进入播放器；推荐结果会随资源站更新。</p>
+    <p class="tip">点击任一作品即可进入播放器；推荐结果会随资源站更新。</p>
   </main>
 </body>
 </html>"""
@@ -911,6 +1026,7 @@ def _player_html(title: str) -> str:
     body.sheet-open {{ overflow: hidden; }}
     button {{ font: inherit; }}
     main {{ width: min(100%, 980px); margin: 0 auto; padding: 12px 12px max(22px, env(safe-area-inset-bottom)); }}
+    .watch-stage {{ display: flex; min-height: calc(100vh - 24px); min-height: calc(var(--player-viewport-height, 100vh) - 24px); flex-direction: column; justify-content: center; }}
     .heading {{ margin: 1px 2px 10px; }}
     h1 {{ display: -webkit-box; overflow: hidden; margin: 0 0 3px; font-size: clamp(17px, 4.4vw, 21px); font-weight: 650; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }}
     #meta {{ color: #8f949d; font-size: 13px; }}
@@ -928,13 +1044,17 @@ def _player_html(title: str) -> str:
     .pill-button {{ position: absolute; top: 8px; min-height: 31px; padding: 0 10px; border-radius: 16px; font-size: 12px; line-height: 1; }}
     #episodeOpen {{ left: 8px; min-width: 52px; }}
     #currentEpisode {{ position: absolute; z-index: 3; top: 8px; left: 50%; max-width: 46%; min-height: 31px; overflow: hidden; padding: 0 10px; color: #fff; font-size: 13px; line-height: 31px; text-overflow: ellipsis; text-shadow: 0 1px 4px #000; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }}
-    #qualityButton {{ right: 8px; min-width: 52px; }}
+    .top-right-actions {{ position: absolute; z-index: 3; top: 8px; right: 8px; display: flex; align-items: center; gap: 6px; pointer-events: none; }}
+    .top-right-actions .pill-button {{ position: static; top: auto; pointer-events: auto; }}
+    #qualityButton {{ min-width: 52px; }}
     #qualityButton:disabled {{ opacity: .72; }}
-    #fullscreenButton {{ position: absolute; top: auto; right: 9px; bottom: 54px; z-index: 3; width: 34px; height: 34px; padding: 7px; border-radius: 8px; }}
+    #fullscreenButton {{ flex: 0 0 auto; width: 31px; height: 31px; min-height: 31px; padding: 6px; border-radius: 50%; }}
     #fullscreenButton svg {{ width: 100%; height: 100%; fill: currentColor; }}
     #fullscreenButton .exit-fullscreen-icon {{ display: none; }}
     .video-shell.is-fullscreen #fullscreenButton .enter-fullscreen-icon {{ display: none; }}
     .video-shell.is-fullscreen #fullscreenButton .exit-fullscreen-icon {{ display: block; }}
+    #holdSpeedHint {{ position: absolute; z-index: 5; top: 48px; left: 10px; display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 26px; padding: 0 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 13px; color: rgba(255,255,255,.82); background: rgba(8,10,13,.3); font-size: 12px; font-weight: 650; pointer-events: none; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }}
+    #holdSpeedHint[hidden] {{ display: none; }}
     .quality-menu {{ position: absolute; z-index: 4; top: 44px; right: 8px; display: grid; grid-template-columns: repeat(2,minmax(68px,1fr)); gap: 3px; min-width: 156px; max-height: calc(100% - 52px); overflow-y: auto; padding: 5px; border: 1px solid #343840; border-radius: 10px; background: rgba(22,24,29,.96); box-shadow: 0 10px 30px rgba(0,0,0,.4); pointer-events: auto; }}
     .quality-menu[hidden] {{ display: none; }}
     .quality-menu button {{ display: block; width: 100%; min-height: 35px; padding: 0 8px; border: 0; border-radius: 7px; color: #d9dde3; background: transparent; text-align: center; }}
@@ -984,16 +1104,24 @@ def _player_html(title: str) -> str:
 </head>
 <body>
   <main>
-    <header class="heading">
-      <h1 id="title">{safe_title}</h1>
-      <div id="meta">正在载入剧集…</div>
-    </header>
-    <div id="videoShell" class="video-shell">
-      <video id="video" controls controlslist="nofullscreen nodownload noremoteplayback" disablepictureinpicture playsinline webkit-playsinline preload="metadata"></video>
-      <div class="video-actions">
+    <section class="watch-stage">
+      <header class="heading">
+        <h1 id="title">{safe_title}</h1>
+        <div id="meta">正在载入剧集…</div>
+      </header>
+      <div id="videoShell" class="video-shell">
+        <video id="video" controls controlslist="nofullscreen nodownload noremoteplayback" disablepictureinpicture playsinline webkit-playsinline preload="metadata"></video>
+        <div class="video-actions">
+          <div id="holdSpeedHint" role="status" aria-live="polite" hidden>2×</div>
         <button id="episodeOpen" class="pill-button" type="button" aria-label="选择剧集">选集</button>
         <div id="currentEpisode" aria-live="polite">第01集</div>
-        <button id="qualityButton" class="pill-button" type="button" aria-label="选择清晰度" disabled><span id="qualityLabel">原画</span></button>
+        <div class="top-right-actions">
+          <button id="qualityButton" class="pill-button" type="button" aria-label="选择清晰度" disabled><span id="qualityLabel">原画</span></button>
+          <button id="fullscreenButton" class="pill-button" type="button" aria-label="全屏播放">
+            <svg class="enter-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H3v4h2V5h2V3Zm14 4V3h-4v2h2v2h2ZM5 17H3v4h4v-2H5v-2Zm16 0h-2v2h-2v2h4v-4Z"/></svg>
+            <svg class="exit-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3H3v4h4V5H5V3Zm14 0v2h-2v2h4V3h-2ZM7 17H3v4h2v-2h2v-2Zm14 0h-4v2h2v2h2v-4Z"/></svg>
+          </button>
+        </div>
         <div id="qualityMenu" class="quality-menu" role="menu" hidden></div>
         <button id="previous" class="icon-button" type="button" aria-label="上一集">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.4 7.4 10.8 12l4.6 4.6L14 18l-6-6 6-6 1.4 1.4Z"/></svg>
@@ -1001,25 +1129,22 @@ def _player_html(title: str) -> str:
         <button id="next" class="icon-button" type="button" aria-label="下一集">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.6 16.6 4.6-4.6-4.6-4.6L10 6l6 6-6 6-1.4-1.4Z"/></svg>
         </button>
-        <button id="fullscreenButton" class="pill-button" type="button" aria-label="全屏播放">
-          <svg class="enter-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H3v4h2V5h2V3Zm14 4V3h-4v2h2v2h2ZM5 17H3v4h4v-2H5v-2Zm16 0h-2v2h-2v2h4v-4Z"/></svg>
-          <svg class="exit-fullscreen-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3H3v4h4V5H5V3Zm14 0v2h-2v2h4V3h-2ZM7 17H3v4h2v-2h2v-2Zm14 0h-4v2h2v2h2v-4Z"/></svg>
-        </button>
+        </div>
+        <div id="episodeSheet" class="sheet" hidden aria-hidden="true">
+          <button id="sheetBackdrop" class="sheet-backdrop" type="button" aria-label="关闭选集"></button>
+          <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+            <header class="sheet-header"><span id="sheetTitle" class="sheet-title">选择剧集</span><button id="sheetClose" class="sheet-close" type="button" aria-label="关闭">×</button></header>
+            <div id="episodeGrid" class="episode-grid"></div>
+          </section>
+        </div>
       </div>
-      <div id="episodeSheet" class="sheet" hidden aria-hidden="true">
-        <button id="sheetBackdrop" class="sheet-backdrop" type="button" aria-label="关闭选集"></button>
-        <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
-          <header class="sheet-header"><span id="sheetTitle" class="sheet-title">选择剧集</span><button id="sheetClose" class="sheet-close" type="button" aria-label="关闭">×</button></header>
-          <div id="episodeGrid" class="episode-grid"></div>
-        </section>
+      <div class="below-player">
+        <label class="switch-label"><input id="autoNext" type="checkbox" checked><span class="switch"></span><span>自动连播</span></label>
+        <p id="status"></p>
+        <button id="retry" type="button" hidden>重试</button>
+        <a id="direct" target="_blank" rel="noreferrer">线路</a>
       </div>
-    </div>
-    <div class="below-player">
-      <label class="switch-label"><input id="autoNext" type="checkbox" checked><span class="switch"></span><span>自动连播</span></label>
-      <p id="status"></p>
-      <button id="retry" type="button" hidden>重试</button>
-      <a id="direct" target="_blank" rel="noreferrer">线路</a>
-    </div>
+    </section>
     <section id="inlineEpisodes" class="inline-episodes" aria-labelledby="inlineEpisodesTitle">
       <header class="inline-episodes-header">
         <span id="inlineEpisodesTitle" class="inline-episodes-title">选集</span>
@@ -1029,7 +1154,7 @@ def _player_html(title: str) -> str:
     </section>
   </main>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
-  <script src="../player.js?v=2.1.0"></script>
+  <script src="../player.js?v=2.4.0"></script>
 </body>
 </html>"""
 
@@ -1060,6 +1185,7 @@ _PLAYER_JAVASCRIPT = r"""
   const qualityLabel = document.querySelector('#qualityLabel');
   const qualityMenu = document.querySelector('#qualityMenu');
   const fullscreenButton = document.querySelector('#fullscreenButton');
+  const holdSpeedHint = document.querySelector('#holdSpeedHint');
   const token = location.pathname.split('/').filter(Boolean).pop() || 'unknown';
   const apiUrl = new URL(location.href);
   apiUrl.pathname = apiUrl.pathname.replace('/watch/', '/api/');
@@ -1067,20 +1193,61 @@ _PLAYER_JAVASCRIPT = r"""
   apiUrl.hash = '';
 
   let data = null;
+  let mediaStorageId = `session-${token}`;
   let current = 0;
   let hls = null;
-  let qualityPreference = localStorage.getItem('short-drama:quality') || 'auto';
+  function storageGet(key) {
+    try { return localStorage.getItem(key); } catch (_error) { return null; }
+  }
+
+  function storageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (_error) { /* private mode/quota */ }
+  }
+
+  function storageRemove(key) {
+    try { localStorage.removeItem(key); } catch (_error) { /* private mode/quota */ }
+  }
+
+  function stableMediaId(body) {
+    const identity = [body.title, body.source, body.cover]
+      .map((value) => String(value || '').trim())
+      .join('\n');
+    let hash = 2166136261;
+    for (let index = 0; index < identity.length; index += 1) {
+      hash ^= identity.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  let qualityPreference = storageGet('short-drama:quality') || 'auto';
   let lastProgressSecond = -1;
+  let holdSpeedTimer = null;
+  let holdSpeedHintTimer = null;
+  let holdSpeedPointer = null;
+  let holdSpeedOriginalRate = 1;
+  let holdSpeedActive = false;
+  let suppressVideoClickUntil = 0;
 
-  const progressKey = (index) => `short-drama:${token}:${index}:time`;
-  const episodeKey = `short-drama:${token}:episode`;
+  const progressKey = (index) => `short-drama:history:${mediaStorageId}:${index}:time`;
+  const episodeKey = () => `short-drama:history:${mediaStorageId}:episode`;
+  const legacyProgressKey = (index) => `short-drama:${token}:${index}:time`;
+  const legacyEpisodeKey = `short-drama:${token}:episode`;
 
-  const savedAutoNext = localStorage.getItem('short-drama:auto-next');
+  const savedAutoNext = storageGet('short-drama:auto-next');
   autoNext.checked = savedAutoNext === null ? true : savedAutoNext === 'true';
 
   function show(message, canRetry = false) {
     status.textContent = message || '';
     retry.hidden = !canRetry;
+  }
+
+  function updatePlayerViewportHeight() {
+    const visibleHeight = window.visualViewport?.height || window.innerHeight;
+    document.documentElement.style.setProperty(
+      '--player-viewport-height',
+      `${Math.max(320, Math.round(visibleHeight))}px`,
+    );
   }
 
   function destroyHls() {
@@ -1100,6 +1267,54 @@ _PLAYER_JAVASCRIPT = r"""
     document.querySelectorAll('.episode-item').forEach((button) => {
       button.classList.toggle('active', Number(button.dataset.index) === current);
     });
+  }
+
+  function stopHoldSpeed() {
+    if (holdSpeedTimer !== null) {
+      window.clearTimeout(holdSpeedTimer);
+      holdSpeedTimer = null;
+    }
+    holdSpeedPointer = null;
+    if (holdSpeedHintTimer !== null) {
+      window.clearTimeout(holdSpeedHintTimer);
+      holdSpeedHintTimer = null;
+    }
+    holdSpeedHint.hidden = true;
+    if (!holdSpeedActive) return;
+    video.playbackRate = holdSpeedOriginalRate;
+    holdSpeedActive = false;
+    suppressVideoClickUntil = Date.now() + 350;
+  }
+
+  function showHoldSpeedHint() {
+    if (holdSpeedHintTimer !== null) window.clearTimeout(holdSpeedHintTimer);
+    holdSpeedHint.hidden = false;
+    holdSpeedHintTimer = window.setTimeout(() => {
+      holdSpeedHint.hidden = true;
+      holdSpeedHintTimer = null;
+    }, 1200);
+  }
+
+  function startHoldSpeed(event) {
+    if ((event.pointerType === 'mouse' && event.button !== 0) || video.paused || video.ended) return;
+    const bounds = video.getBoundingClientRect();
+    const nativeControlsHeight = Math.min(72, Math.max(48, bounds.height * .18));
+    if (event.clientY >= bounds.bottom - nativeControlsHeight) return;
+    stopHoldSpeed();
+    holdSpeedPointer = event.pointerId;
+    holdSpeedTimer = window.setTimeout(() => {
+      holdSpeedTimer = null;
+      if (video.paused || video.ended) return;
+      holdSpeedOriginalRate = video.playbackRate;
+      video.playbackRate = 2;
+      holdSpeedActive = true;
+      showHoldSpeedHint();
+    }, 350);
+  }
+
+  function finishHoldSpeed(event) {
+    if (holdSpeedPointer !== null && event.pointerId !== holdSpeedPointer) return;
+    stopHoldSpeed();
   }
 
   function applyVideoAspect() {
@@ -1237,7 +1452,7 @@ _PLAYER_JAVASCRIPT = r"""
       hls.currentLevel = index;
       qualityPreference = level.height ? `height:${level.height}` : `bitrate:${level.bitrate}`;
     }
-    localStorage.setItem('short-drama:quality', qualityPreference);
+    storageSet('short-drama:quality', qualityPreference);
     qualityMenu.hidden = true;
     updateQualityActive(value === 'auto' ? null : Number(value));
   }
@@ -1282,27 +1497,54 @@ _PLAYER_JAVASCRIPT = r"""
   }
 
   function restoreTime(index) {
-    const seconds = Number(localStorage.getItem(progressKey(index)) || 0);
+    const seconds = Number(storageGet(progressKey(index)) || 0);
     if (Number.isFinite(seconds) && seconds > 2) {
       const apply = () => {
         if (!Number.isFinite(video.duration) || seconds < video.duration - 10) {
           video.currentTime = seconds;
         }
       };
-      video.addEventListener('loadedmetadata', apply, { once: true });
+      if (video.readyState >= 1) apply();
+      else video.addEventListener('loadedmetadata', apply, { once: true });
+    }
+  }
+
+  function saveCurrentProgress() {
+    if (!data || !Number.isFinite(video.currentTime) || video.currentTime <= 2) return;
+    if (video.ended || (Number.isFinite(video.duration) && video.currentTime >= video.duration - 10)) {
+      storageRemove(progressKey(current));
+      return;
+    }
+    storageSet(progressKey(current), String(video.currentTime));
+  }
+
+  function migrateLegacyHistory() {
+    const currentEpisodeKey = episodeKey();
+    if (storageGet(currentEpisodeKey) === null) {
+      const legacyEpisode = storageGet(legacyEpisodeKey);
+      if (legacyEpisode !== null) storageSet(currentEpisodeKey, legacyEpisode);
+    }
+    for (let index = 0; index < data.episodes.length; index += 1) {
+      const currentKey = progressKey(index);
+      if (storageGet(currentKey) === null) {
+        const legacyProgress = storageGet(legacyProgressKey(index));
+        if (legacyProgress !== null) storageSet(currentKey, legacyProgress);
+      }
     }
   }
 
   function loadEpisode(index, shouldPlay = false) {
     if (!data || index < 0 || index >= data.episodes.length) return;
+    saveCurrentProgress();
     destroyHls();
     current = index;
     const episode = data.episodes[index];
     direct.href = episode.url;
     direct.title = `${episode.name} 直链`;
-    localStorage.setItem(episodeKey, String(index));
+    storageSet(episodeKey(), String(index));
     const shareUrl = new URL(location.href);
     shareUrl.searchParams.set('ep', String(index + 1));
+    shareUrl.searchParams.delete('force');
     history.replaceState(null, '', shareUrl);
     updateButtons();
     show(`正在载入 ${episode.name}…`);
@@ -1345,15 +1587,21 @@ _PLAYER_JAVASCRIPT = r"""
     .then(({ response, body }) => {
       if (!response.ok || !body.ok) throw new Error(body.error || '剧集载入失败');
       data = body;
+      mediaStorageId = stableMediaId(body);
+      migrateLegacyHistory();
       title.textContent = body.title;
       meta.textContent = `${body.source} · 共${body.episodes.length}集`;
       document.title = body.title;
       renderEpisodes();
-      const requested = Number(new URL(location.href).searchParams.get('ep')) - 1;
-      const saved = Number(localStorage.getItem(episodeKey));
-      const initial = Number.isInteger(requested) && requested >= 0
+      const pageUrl = new URL(location.href);
+      const requested = Number(pageUrl.searchParams.get('ep')) - 1;
+      const forced = pageUrl.searchParams.get('force') === '1';
+      const saved = Number(storageGet(episodeKey()));
+      const hasRequested = Number.isInteger(requested) && requested >= 0;
+      const hasSaved = Number.isInteger(saved) && saved >= 0;
+      const initial = forced && hasRequested
         ? requested
-        : (Number.isInteger(saved) && saved >= 0 ? saved : 0);
+        : (hasSaved ? saved : (hasRequested ? requested : 0));
       loadEpisode(Math.min(initial, body.episodes.length - 1));
     })
     .catch((error) => show(error.message || '剧集载入失败', true));
@@ -1376,21 +1624,44 @@ _PLAYER_JAVASCRIPT = r"""
     if (event.key === 'Escape') closeEpisodeSheet();
   });
   autoNext.addEventListener('change', () => {
-    localStorage.setItem('short-drama:auto-next', String(autoNext.checked));
+    storageSet('short-drama:auto-next', String(autoNext.checked));
   });
   video.addEventListener('loadedmetadata', applyVideoAspect);
-  window.addEventListener('resize', applyVideoAspect);
+  video.addEventListener('pointerdown', startHoldSpeed);
+  window.addEventListener('pointerup', finishHoldSpeed);
+  window.addEventListener('pointercancel', finishHoldSpeed);
+  video.addEventListener('pointerleave', (event) => {
+    if (event.pointerType === 'mouse') finishHoldSpeed(event);
+  });
+  video.addEventListener('contextmenu', (event) => event.preventDefault());
+  video.addEventListener('click', (event) => {
+    if (Date.now() < suppressVideoClickUntil) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+  updatePlayerViewportHeight();
+  window.addEventListener('resize', () => {
+    updatePlayerViewportHeight();
+    applyVideoAspect();
+  });
+  window.visualViewport?.addEventListener('resize', updatePlayerViewportHeight);
   document.addEventListener('fullscreenchange', updateFullscreenState);
   document.addEventListener('webkitfullscreenchange', updateFullscreenState);
   video.addEventListener('timeupdate', () => {
     const second = Math.floor(video.currentTime);
     if (second >= 0 && (lastProgressSecond < 0 || second - lastProgressSecond >= 5)) {
       lastProgressSecond = second;
-      localStorage.setItem(progressKey(current), String(video.currentTime));
+      saveCurrentProgress();
     }
   });
+  video.addEventListener('seeked', saveCurrentProgress);
+  window.addEventListener('pagehide', saveCurrentProgress);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveCurrentProgress();
+  });
   video.addEventListener('ended', () => {
-    localStorage.removeItem(progressKey(current));
+    storageRemove(progressKey(current));
     if (autoNext.checked && data && current < data.episodes.length - 1) {
       loadEpisode(current + 1, true);
     }

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from pathlib import Path
 
 from astrbot.api import AstrBotConfig, star
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Plain, Share
+from astrbot.api.star import StarTools
+from astrbot.api.web import error_response, json_response, request
+from astrbot.core.message.message_event_result import MessageChain
 
 from .search import (
     CollectionPage,
@@ -24,11 +30,51 @@ from .search import (
     select_episode,
 )
 from .player_server import ShortDramaPlayerServer
+from .schedule_store import (
+    RecommendationScheduleStore,
+    ScheduleConfigError,
+    task_cron_expression,
+    validate_task,
+)
 from .watch_url import build_watch_url
 
 
 logger = logging.getLogger("jiang_short_drama")
 _DEFAULT_COVER = "https://duanjubaike.cn/favicon.ico"
+_SCHEDULE_JOB_PREFIX = "short_drama_recommend_"
+_ACTIVE_PLUGIN = None
+
+
+def _recommendation_heading(media_type: str) -> str:
+    if media_type == "全部":
+        return "最新全分类推荐"
+    return f"最新{media_type}推荐"
+
+
+def _first_recommendation_cover(
+    recommendations: tuple[SearchResult, ...],
+) -> str:
+    """只使用推荐列表第一条的封面，缺失时回退默认图。"""
+    if not recommendations:
+        return _DEFAULT_COVER
+    return recommendations[0].cover_url or _DEFAULT_COVER
+
+
+async def _scheduled_recommendation_callback(
+    task_id: str = "",
+    **_: object,
+) -> None:
+    plugin = _ACTIVE_PLUGIN
+    if plugin is None:
+        logger.warning("[SHORT_DRAMA] scheduled task skipped: plugin unavailable")
+        return
+    try:
+        await plugin._execute_schedule_task(task_id)
+    except Exception:
+        logger.exception(
+            "[SHORT_DRAMA] scheduled recommendation failed task=%s",
+            task_id,
+        )
 
 
 def _strip_system_identity_prefix(text: str) -> str:
@@ -137,9 +183,11 @@ class Main(star.Star):
         context: star.Context,
         config: AstrBotConfig | None = None,
     ) -> None:
+        global _ACTIVE_PLUGIN
         super().__init__(context)
         self.context = context
         self.config = config or {}
+        _ACTIVE_PLUGIN = self
         self.searcher = ShortDramaSearcher(
             timeout_seconds=_safe_float(
                 self.config.get("request_timeout_seconds"), 10, 2, 30
@@ -181,6 +229,12 @@ class Main(star.Star):
             ),
         )
         self.player_server.collection_loader = self.searcher.search_collection_page
+        data_dir = Path(StarTools.get_data_dir("jiang_short_drama"))
+        self.schedule_store = RecommendationScheduleStore(
+            data_dir / "recommendation_schedules.json"
+        )
+        self._schedule_lock = asyncio.Lock()
+        self._register_page_apis()
         configured_base = self.config.get("episode_player_public_base_url")
         if configured_base and not self.player_server.configured:
             logger.warning(
@@ -190,9 +244,206 @@ class Main(star.Star):
 
     async def initialize(self) -> None:
         await self.player_server.start()
+        await self._sync_schedule_jobs()
 
     async def terminate(self) -> None:
+        global _ACTIVE_PLUGIN
+        await self._remove_schedule_jobs()
         await self.player_server.stop()
+        if _ACTIVE_PLUGIN is self:
+            _ACTIVE_PLUGIN = None
+
+    def _register_page_apis(self) -> None:
+        if not hasattr(self.context, "register_web_api"):
+            logger.warning("[SHORT_DRAMA] current AstrBot has no Plugin Pages support")
+            return
+        routes = (
+            ("schedules", self.page_get_schedules, ["GET"], "List recommendation schedules"),
+            ("schedules/save", self.page_save_schedule, ["POST"], "Save recommendation schedule"),
+            ("schedules/delete", self.page_delete_schedule, ["POST"], "Delete recommendation schedule"),
+            ("schedules/toggle", self.page_toggle_schedule, ["POST"], "Toggle recommendation schedule"),
+            ("schedules/test", self.page_test_schedule, ["POST"], "Test recommendation schedule"),
+        )
+        for path, handler, methods, description in routes:
+            self.context.register_web_api(
+                f"/jiang_short_drama/page/{path}",
+                handler,
+                methods,
+                description,
+            )
+
+    async def page_get_schedules(self):
+        return json_response(
+            {"status": "ok", "data": self.schedule_store.public_config()}
+        )
+
+    async def page_save_schedule(self):
+        try:
+            payload = await request.json(default={})
+            async with self._schedule_lock:
+                task = self.schedule_store.upsert((payload or {}).get("task", payload))
+                await self._sync_schedule_jobs()
+            return json_response(
+                {
+                    "status": "ok",
+                    "data": {
+                        **self.schedule_store.public_config(),
+                        "saved_id": task["id"],
+                    },
+                }
+            )
+        except ScheduleConfigError as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception as exc:
+            logger.exception("[SHORT_DRAMA] WebUI schedule save failed")
+            return error_response(str(exc), status_code=500)
+
+    async def page_delete_schedule(self):
+        try:
+            payload = await request.json(default={})
+            task_id = str((payload or {}).get("id") or "").strip()
+            async with self._schedule_lock:
+                if not self.schedule_store.delete(task_id):
+                    raise ScheduleConfigError("没有找到这个定时任务")
+                await self._sync_schedule_jobs()
+            return json_response(
+                {"status": "ok", "data": self.schedule_store.public_config()}
+            )
+        except ScheduleConfigError as exc:
+            return error_response(str(exc), status_code=404)
+        except Exception as exc:
+            logger.exception("[SHORT_DRAMA] WebUI schedule delete failed")
+            return error_response(str(exc), status_code=500)
+
+    async def page_toggle_schedule(self):
+        try:
+            payload = await request.json(default={})
+            task_id = str((payload or {}).get("id") or "").strip()
+            current = self.schedule_store.get(task_id)
+            if current is None:
+                raise ScheduleConfigError("没有找到这个定时任务")
+            current["enabled"] = bool((payload or {}).get("enabled"))
+            async with self._schedule_lock:
+                self.schedule_store.upsert(current)
+                await self._sync_schedule_jobs()
+            return json_response(
+                {"status": "ok", "data": self.schedule_store.public_config()}
+            )
+        except ScheduleConfigError as exc:
+            return error_response(str(exc), status_code=404)
+        except Exception as exc:
+            logger.exception("[SHORT_DRAMA] WebUI schedule toggle failed")
+            return error_response(str(exc), status_code=500)
+
+    async def page_test_schedule(self):
+        try:
+            payload = await request.json(default={})
+            task_id = str((payload or {}).get("id") or "").strip()
+            if task_id:
+                task = self.schedule_store.get(task_id)
+                if task is None:
+                    raise ScheduleConfigError("没有找到这个定时任务")
+            else:
+                task = validate_task((payload or {}).get("task", payload))
+            result = await self._send_scheduled_recommendations(task)
+            return json_response({"status": "ok", "data": result})
+        except ScheduleConfigError as exc:
+            return error_response(str(exc), status_code=400)
+        except Exception as exc:
+            logger.exception("[SHORT_DRAMA] WebUI schedule test failed")
+            return error_response(str(exc), status_code=502)
+
+    async def _remove_schedule_jobs(self) -> None:
+        try:
+            jobs = await self.context.cron_manager.list_jobs(job_type="basic")
+            for job in jobs:
+                if job.name.startswith(_SCHEDULE_JOB_PREFIX):
+                    await self.context.cron_manager.delete_job(job.job_id)
+        except Exception:
+            logger.exception("[SHORT_DRAMA] failed to remove schedule jobs")
+
+    async def _sync_schedule_jobs(self) -> None:
+        await self._remove_schedule_jobs()
+        for task in self.schedule_store.load():
+            if not task.get("enabled"):
+                continue
+            await self.context.cron_manager.add_basic_job(
+                name=f"{_SCHEDULE_JOB_PREFIX}{task['id']}",
+                cron_expression=task_cron_expression(task),
+                handler=_scheduled_recommendation_callback,
+                payload={"task_id": task["id"]},
+                description=f"{task['media_type']}最新资源定时推荐",
+                timezone="Asia/Shanghai",
+                persistent=True,
+            )
+            logger.info(
+                "[SHORT_DRAMA] schedule registered id=%s cron=%s session=%s",
+                task["id"],
+                task_cron_expression(task),
+                task["session"],
+            )
+
+    async def _execute_schedule_task(self, task_id: str) -> dict[str, object]:
+        task = self.schedule_store.get(task_id)
+        if task is None or not task.get("enabled"):
+            logger.info("[SHORT_DRAMA] disabled/missing schedule skipped id=%s", task_id)
+            return {"sent": False, "count": 0}
+        return await self._send_scheduled_recommendations(task)
+
+    async def _send_scheduled_recommendations(
+        self,
+        task: dict[str, object],
+    ) -> dict[str, object]:
+        media_type = str(task.get("media_type") or "短剧")
+        search_media_type = None if media_type == "全部" else media_type
+        results = await self.searcher.recommend_results(
+            int(task.get("limit") or 12),
+            media_type=search_media_type,
+        )
+        if not results:
+            raise RuntimeError(f"当前资源站没有可推荐的{media_type}资源")
+
+        heading = _recommendation_heading(media_type)
+        recommendations_url = self.player_server.create_recommendations_url(
+            results,
+            heading,
+        )
+        if recommendations_url:
+            first_cover = _first_recommendation_cover(results)
+            card_cover = (
+                self.player_server.create_card_cover_url(first_cover)
+                or first_cover
+            )
+            chain = MessageChain(
+                [
+                    Share(
+                        url=recommendations_url,
+                        title=f"{heading}｜{len(results)}部",
+                        content="定时推荐 · 点击查看封面并选择播放",
+                        image=card_cover,
+                    )
+                ]
+            )
+        else:
+            chain = MessageChain(
+                [Plain("\n".join(item.title for item in results))]
+            )
+        sent = await self.context.send_message(str(task["session"]), chain)
+        if not sent:
+            raise RuntimeError("没有找到该 UMO 对应的消息平台")
+        logger.info(
+            "[SHORT_DRAMA] scheduled recommendation sent id=%s media=%s count=%s session=%s",
+            task.get("id") or "test",
+            media_type,
+            len(results),
+            task["session"],
+        )
+        return {
+            "sent": True,
+            "count": len(results),
+            "media_type": media_type,
+            "session": task["session"],
+        }
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def short_drama(self, event: AstrMessageEvent):
@@ -212,10 +463,16 @@ class Main(star.Star):
             recommendations_url = self.player_server.create_recommendations_url(
                 recommendations
             )
+            first_cover = _first_recommendation_cover(recommendations)
+            card_cover = (
+                self.player_server.create_card_cover_url(first_cover)
+                or first_cover
+            )
             if recommendations_url and await self._send_recommendations_card(
                 event,
                 recommendations,
                 recommendations_url,
+                card_cover,
             ):
                 logger.info(
                     "[SHORT_DRAMA] recommendation card sent items=%s",
@@ -450,7 +707,11 @@ class Main(star.Star):
             )
             return
 
-        watch_url, player_can_select = self._watch_url(result, episode)
+        watch_url, player_can_select = self._watch_url(
+            result,
+            episode,
+            force_episode=requested_episode is not None,
+        )
         sent = await self._send_card(
             event,
             result,
@@ -478,8 +739,14 @@ class Main(star.Star):
         self,
         result: SearchResult,
         episode: Episode,
+        *,
+        force_episode: bool = False,
     ) -> tuple[str, bool]:
-        playlist_url = self.player_server.create_watch_url(result, episode)
+        playlist_url = self.player_server.create_watch_url(
+            result,
+            episode,
+            force_episode=force_episode,
+        )
         if playlist_url:
             return playlist_url, True
 
@@ -582,11 +849,8 @@ class Main(star.Star):
         event: AstrMessageEvent,
         recommendations: tuple[SearchResult, ...],
         recommendations_url: str,
+        cover_url: str,
     ) -> bool:
-        cover = next(
-            (result.cover_url for result in recommendations if result.cover_url),
-            _DEFAULT_COVER,
-        )
         message = [
             {
                 "type": "wechat_link_card",
@@ -594,7 +858,7 @@ class Main(star.Star):
                     "title": f"最新短剧推荐｜{len(recommendations)}部"[:48],
                     "desc": "点击查看封面并选择播放",
                     "url": recommendations_url,
-                    "image_url": cover,
+                    "image_url": cover_url,
                 },
             }
         ]
