@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import unittest
 
-from .main import _compact_play_card_text, _compact_variants_card_text
+from .main import (
+    _compact_play_card_text,
+    _compact_variants_card_text,
+    _media_help_text,
+)
 from .search import (
     CollectionPage,
     Episode,
     SearchResult,
     best_item,
     candidate_pool,
+    extract_media_query,
     extract_query,
     extract_sports_query,
     fuzzy_search_terms,
     is_exact_sports_replay_result,
+    is_media_category,
+    is_media_help_command,
     is_recommendation_command,
     is_selectable_variant,
     is_sports_category,
@@ -36,6 +43,7 @@ from .player_server import (
     _PLAYER_JAVASCRIPT,
     _collection_html,
     _player_html,
+    _recommendation_html,
     _variant_html,
     CollectionStore,
     EpisodePlaylistStore,
@@ -55,6 +63,32 @@ class CommandMatchTests(unittest.TestCase):
         self.assertIsNone(extract_query("短剧　闪婚"))
         self.assertIsNone(extract_query("/短剧 闪婚"))
         self.assertIsNone(extract_query(" 短剧 闪婚"))
+
+    def test_media_commands_require_ascii_space_and_return_type(self):
+        self.assertEqual(extract_media_query("短剧 闪婚"), ("短剧", "闪婚"))
+        self.assertEqual(
+            extract_media_query("电视剧   三国演义   "),
+            ("电视剧", "三国演义"),
+        )
+        self.assertEqual(extract_media_query("电影 红楼梦"), ("电影", "红楼梦"))
+        self.assertEqual(extract_media_query("动漫 海贼王"), ("动漫", "海贼王"))
+        self.assertEqual(extract_media_query("综艺 奔跑吧"), ("综艺", "奔跑吧"))
+        self.assertEqual(extract_media_query("剧 三国演义"), ("剧", "三国演义"))
+        self.assertIsNone(extract_media_query("电视剧"))
+        self.assertIsNone(extract_media_query("电影流浪地球"))
+        self.assertIsNone(extract_media_query("动漫　海贼王"))
+        self.assertIsNone(extract_media_query("/综艺 奔跑吧"))
+
+    def test_media_help_requires_exact_command(self):
+        self.assertTrue(is_media_help_command("剧"))
+        self.assertFalse(is_media_help_command("剧 "))
+        self.assertFalse(is_media_help_command("/剧"))
+        help_text = _media_help_text()
+        for command in ("短剧", "电视剧", "电影", "动漫", "综艺", "体育", "剧 名称"):
+            self.assertIn(command, help_text)
+        for section in ("🔍 分类搜索", "🏟️ 体育回放", "✨ 最新推荐", "⚙️ 选集与版本"):
+            self.assertIn(section, help_text)
+        self.assertIn("最新12部", help_text)
 
     def test_sports_command_requires_query_and_ascii_space(self):
         self.assertEqual(extract_sports_query("体育 斯诺克"), "斯诺克")
@@ -234,6 +268,68 @@ class CardTextTests(unittest.TestCase):
 
 
 class PlayUrlTests(unittest.TestCase):
+    def test_matching_items_strictly_filter_media_categories(self):
+        rows = [
+            {
+                "vod_name": "同名作品",
+                "type_name": category,
+                "vod_play_url": f"正片$https://example.com/{index}.m3u8",
+            }
+            for index, category in enumerate(
+                ("短剧", "国产剧", "剧情片", "国产动漫", "大陆综艺"),
+                start=1,
+            )
+        ]
+        expected = {
+            "短剧": "短剧",
+            "电视剧": "国产剧",
+            "电影": "剧情片",
+            "动漫": "国产动漫",
+            "综艺": "大陆综艺",
+        }
+        for media_type, category in expected.items():
+            with self.subTest(media_type=media_type):
+                results = matching_items(
+                    "同名作品",
+                    rows,
+                    "测试源",
+                    media_type,
+                )
+                self.assertEqual([item.category for item in results], [category])
+
+    def test_media_category_rejects_missing_or_cross_type_categories(self):
+        self.assertTrue(is_media_category("短剧", "短剧大全"))
+        self.assertTrue(is_media_category("短剧", "AI漫剧"))
+        self.assertFalse(is_media_category("短剧", "国产剧"))
+        self.assertTrue(is_media_category("电视剧", "香港剧"))
+        self.assertTrue(is_media_category("电视剧", "连续剧"))
+        self.assertFalse(is_media_category("电视剧", "短剧"))
+        self.assertTrue(is_media_category("电影", "动作片"))
+        self.assertFalse(is_media_category("电影", "电影解说"))
+        self.assertTrue(is_media_category("动漫", "日韩动漫"))
+        self.assertTrue(is_media_category("动漫", "动画片"))
+        self.assertTrue(is_media_category("综艺", "真人秀"))
+        self.assertFalse(is_media_category("综艺", "国产剧"))
+        self.assertFalse(is_media_category("电影", ""))
+
+    def test_unfiltered_media_search_keeps_all_categories(self):
+        rows = [
+            {
+                "vod_name": "同名资源",
+                "type_name": category,
+                "vod_play_url": f"正片$https://example.com/{index}.m3u8",
+            }
+            for index, category in enumerate(
+                ("短剧", "国产剧", "科幻片", "日本动漫", "大陆综艺", "其他"),
+                start=1,
+            )
+        ]
+        results = matching_items("同名资源", rows, "测试源", None)
+        self.assertEqual(
+            {item.category for item in results},
+            {"短剧", "国产剧", "科幻片", "日本动漫", "大陆综艺", "其他"},
+        )
+
     def test_recommendations_include_short_drama_descendants_with_hls(self):
         payload = {
             "class": [
@@ -263,11 +359,24 @@ class PlayUrlTests(unittest.TestCase):
                     "vod_time": "2026-08-05 10:02:00",
                     "vod_play_url": "正片$https://example.com/movie.m3u8",
                 },
+                {
+                    "vod_name": "AI漫剧",
+                    "type_id": 88,
+                    "type_name": "AI漫剧",
+                    "vod_time": "2026-08-05 10:03:00",
+                    "vod_play_url": "正片$https://example.com/comic.m3u8",
+                },
             ],
         }
         candidates = recommendation_candidates(payload, "测试源")
-        self.assertEqual([item.title for item in candidates], ["今日短剧"])
+        self.assertEqual(
+            [item.title for item in candidates],
+            ["今日短剧", "AI漫剧"],
+        )
         self.assertEqual(candidates[0].sort_key, "20260805100000")
+        self.assertEqual(candidates[0].result.category, "现代言情")
+        self.assertEqual(len(candidates[0].result.episodes), 1)
+        self.assertEqual(candidates[1].result.category, "AI漫剧")
 
     def test_selects_longest_hls_route(self):
         value = (
@@ -604,6 +713,18 @@ class EpisodePlayerTests(unittest.TestCase):
         )
         self.assertNotIn("m3u8", url)
 
+    def test_recommendations_url_uses_token_without_embedding_streams(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        url = server.create_recommendations_url((self.result,))
+        self.assertIsNotNone(url)
+        self.assertTrue(
+            url.startswith("https://player.example/short-drama/recommendations/")
+        )
+        self.assertNotIn("m3u8", url)
+
     def test_variant_page_shows_covers_metadata_and_choice_links(self):
         live_action = SearchResult(
             title="三国演义",
@@ -634,6 +755,27 @@ class EpisodePlayerTests(unittest.TestCase):
         self.assertIn("1994年", html)
         self.assertIn("唐国强、鲍国安", html)
         self.assertIn("../choose/safe-token/2", html)
+
+    def test_recommendation_page_shows_covers_and_play_links(self):
+        recommended = SearchResult(
+            title="今日短剧",
+            source="量子资源",
+            episodes=(Episode("第01集", "https://cdn.example/1.m3u8"),),
+            cover_url="https://img.example/recommend.jpg",
+            year="2026",
+            category="短剧",
+        )
+        record = VariantRecord(
+            query_title="最新短剧推荐",
+            variants=(recommended,),
+            expires_at=999,
+        )
+        html = _recommendation_html(record, "recommend-token")
+        self.assertIn("最新短剧推荐", html)
+        self.assertIn("共 1 部", html)
+        self.assertIn("https://img.example/recommend.jpg", html)
+        self.assertIn("../choose/recommend-token/1", html)
+        self.assertNotIn("m3u8", html)
 
     def test_collection_page_uses_lazy_external_script(self):
         html = _collection_html("CBA2023")

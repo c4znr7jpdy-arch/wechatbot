@@ -1,4 +1,4 @@
-"""短剧资源站搜索、标题匹配与播放地址解析。"""
+"""分类影视资源站搜索、标题匹配与播放地址解析。"""
 
 from __future__ import annotations
 
@@ -50,10 +50,17 @@ class SearchResult:
 
 @dataclass(frozen=True, slots=True)
 class Recommendation:
-    title: str
-    source: str
+    result: SearchResult
     updated_at: str
     sort_key: str
+
+    @property
+    def title(self) -> str:
+        return self.result.title
+
+    @property
+    def source(self) -> str:
+        return self.result.source
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,10 +84,22 @@ DEFAULT_SOURCES: tuple[Source, ...] = (
     Source("飘零资源", "https://p2100.net/api.php/provide/vod/"),
 )
 
-_COMMAND_RE = re.compile(r"^短剧[ \t]+(?P<query>\S(?:.*\S)?)$")
+_MEDIA_COMMAND_RE = re.compile(
+    r"^(?P<media_type>短剧|电视剧|电影|动漫|综艺|剧)"
+    r"[ \t]+(?P<query>\S(?:.*\S)?)$"
+)
 _SPORTS_COMMAND_RE = re.compile(r"^体育[ \t]+(?P<query>\S(?:.*\S)?)$")
 _RECOMMENDATION_COMMAND = "短剧推荐"
+_MEDIA_HELP_COMMAND = "剧"
 _SHORT_DRAMA_TYPE_RE = re.compile(r"(?:短剧|漫剧)")
+MEDIA_TYPES = ("短剧", "电视剧", "电影", "动漫", "综艺")
+_TV_CATEGORY_RE = re.compile(
+    r"(?:电视剧|连续剧|国产剧|香港剧|台湾剧|欧美剧|日本剧|韩国剧|"
+    r"泰国剧|海外剧|日剧|韩剧|港剧|台剧|陆剧|美剧|英剧|新马剧|马泰剧)"
+)
+_ANIME_CATEGORY_RE = re.compile(r"(?:动漫|动画|卡通|番剧)")
+_VARIETY_CATEGORY_RE = re.compile(r"(?:综艺|真人秀|脱口秀)")
+_MOVIE_CATEGORY_RE = re.compile(r"(?:电影|片)")
 _EPISODE_REQUEST_RE = re.compile(
     r"^(?P<title>.+?)[ \t]+第(?P<number>[1-9]\d{0,2})集$"
 )
@@ -153,10 +172,18 @@ _NON_VARIANT_RE = re.compile(r"(?:解说|预告|花絮|盘点|剪辑)")
 
 def extract_query(text: str) -> str | None:
     """严格解析“短剧 + ASCII 空白 + 剧名”，不接受命令前缀或全角空格。"""
-    match = _COMMAND_RE.fullmatch((text or "").rstrip())
+    parsed = extract_media_query(text)
+    if parsed is None or parsed[0] != "短剧":
+        return None
+    return parsed[1]
+
+
+def extract_media_query(text: str) -> tuple[str, str] | None:
+    """严格解析分类或全分类影视命令，返回命令类型和查询词。"""
+    match = _MEDIA_COMMAND_RE.fullmatch((text or "").rstrip())
     if not match:
         return None
-    return match.group("query")
+    return match.group("media_type"), match.group("query")
 
 
 def extract_sports_query(text: str) -> str | None:
@@ -170,6 +197,33 @@ def extract_sports_query(text: str) -> str | None:
 def is_recommendation_command(text: str) -> bool:
     """只接受完全一致的“短剧推荐”，不容忍任何前后缀或空白。"""
     return (text or "") == _RECOMMENDATION_COMMAND
+
+
+def is_media_help_command(text: str) -> bool:
+    """仅精确消息“剧”触发影视命令帮助。"""
+    return (text or "") == _MEDIA_HELP_COMMAND
+
+
+def is_media_category(media_type: str, category: str) -> bool:
+    """按命令类型严格判断资源站分类，不接受分类缺失的资源。"""
+    normalized = normalize_title(category)
+    if not normalized or media_type not in MEDIA_TYPES:
+        return False
+    if media_type == "短剧":
+        return bool(_SHORT_DRAMA_TYPE_RE.search(normalized))
+    if media_type == "电视剧":
+        return bool(_TV_CATEGORY_RE.search(normalized)) and not (
+            "短剧" in normalized
+            or _ANIME_CATEGORY_RE.search(normalized)
+            or _VARIETY_CATEGORY_RE.search(normalized)
+        )
+    if media_type == "电影":
+        return bool(_MOVIE_CATEGORY_RE.search(normalized)) and not (
+            "解说" in normalized or "预告" in normalized
+        )
+    if media_type == "动漫":
+        return bool(_ANIME_CATEGORY_RE.search(normalized))
+    return bool(_VARIETY_CATEGORY_RE.search(normalized))
 
 
 def _recommendation_sort_key(value: Any) -> str:
@@ -223,8 +277,8 @@ def recommendation_candidates(
         type_id = str(item.get("type_id") or "")
         if type_id not in type_ids and not _SHORT_DRAMA_TYPE_RE.search(type_name):
             continue
-        title = str(item.get("vod_name") or "").strip()
-        if not title or not parse_episodes(str(item.get("vod_play_url") or "")):
+        result = _result_from_item(item, source_name, EXACT_TITLE_SCORE)
+        if result is None:
             continue
         updated_at = str(
             item.get("vod_time")
@@ -234,8 +288,7 @@ def recommendation_candidates(
         ).strip()
         candidates.append(
             Recommendation(
-                title=title,
-                source=source_name,
+                result=result,
                 updated_at=updated_at,
                 sort_key=_recommendation_sort_key(updated_at),
             )
@@ -510,11 +563,17 @@ def matching_items(
     query: str,
     items: Iterable[Any],
     source_name: str,
+    media_type: str | None = None,
 ) -> list[SearchResult]:
-    """保留单个资源站中的全部可播放匹配项，供同名版本选择使用。"""
+    """保留标题及指定媒体分类均匹配的可播放候选。"""
     candidates: list[SearchResult] = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        category = str(
+            item.get("type_name") or item.get("vod_class") or ""
+        ).strip()
+        if media_type and not is_media_category(media_type, category):
             continue
         title = str(item.get("vod_name") or "").strip()
         score = title_score(query, title)
@@ -561,8 +620,13 @@ def is_selectable_variant(result: SearchResult) -> bool:
     return not _NON_VARIANT_RE.search(metadata)
 
 
-def best_item(query: str, items: Iterable[Any], source_name: str) -> SearchResult | None:
-    candidates = matching_items(query, items, source_name)
+def best_item(
+    query: str,
+    items: Iterable[Any],
+    source_name: str,
+    media_type: str | None = None,
+) -> SearchResult | None:
+    candidates = matching_items(query, items, source_name, media_type)
     if not candidates:
         return None
     return max(candidates, key=lambda result: (result.score, len(result.episodes)))
@@ -602,7 +666,9 @@ class ShortDramaSearcher:
             str,
             tuple[float, SearchResult | None],
         ] = {}
-        self._recommendation_cache: tuple[float, tuple[str, ...]] | None = None
+        self._recommendation_cache: (
+            tuple[float, tuple[SearchResult, ...]] | None
+        ) = None
 
     async def search_sports_replay(self, query: str) -> SearchResult | None:
         """只返回标题完全一致且分类为体育赛事的可播放结果。"""
@@ -769,10 +835,12 @@ class ShortDramaSearcher:
         self,
         query: str,
         limit: int = 6,
+        *,
+        media_type: str | None = None,
     ) -> tuple[SearchResult, ...]:
         """返回可供用户辨认和选择的同名/近名版本。"""
         wanted = max(1, min(int(limit), 10))
-        cache_key = normalize_title(query)
+        cache_key = f"{media_type or '*'}:{normalize_title(query)}"
         cached = self._variant_cache.get(cache_key)
         if cached and cached[0] > time.monotonic():
             return cached[1][:wanted]
@@ -801,6 +869,7 @@ class ShortDramaSearcher:
                         semaphore,
                         source,
                         query,
+                        media_type=media_type,
                     )
                     for source in self.sources
                 )
@@ -818,6 +887,7 @@ class ShortDramaSearcher:
                                 source,
                                 term,
                                 match_query=query,
+                                media_type=media_type,
                             )
                             for term in terms
                             for source in self.sources
@@ -843,9 +913,12 @@ class ShortDramaSearcher:
         self,
         query: str,
         limit: int = 6,
+        *,
+        media_type: str | None = None,
     ) -> tuple[SearchResult, ...]:
         """读取普通搜索顺带生成的版本候选，不发起网络请求。"""
-        cached = self._variant_cache.get(normalize_title(query))
+        cache_key = f"{media_type or '*'}:{normalize_title(query)}"
+        cached = self._variant_cache.get(cache_key)
         if not cached or cached[0] <= time.monotonic():
             return ()
         return cached[1][: max(1, min(int(limit), 10))]
@@ -893,8 +966,8 @@ class ShortDramaSearcher:
         }
         self._variant_cache[cache_key] = (now + 10 * 60, variants)
 
-    async def recommend_titles(self, limit: int = 20) -> tuple[str, ...]:
-        """返回资源站最近更新且可播放的短剧剧名。"""
+    async def recommend_results(self, limit: int = 12) -> tuple[SearchResult, ...]:
+        """返回资源站最近更新且可直接播放的短剧结果。"""
         wanted = max(1, min(int(limit), 50))
         cached = self._recommendation_cache
         if cached and cached[0] > time.monotonic() and len(cached[1]) >= wanted:
@@ -950,7 +1023,7 @@ class ShortDramaSearcher:
             if current is None or candidate.sort_key > current.sort_key:
                 unique[key] = candidate
         ordered = tuple(
-            item.title
+            item.result
             for item in sorted(
                 unique.values(),
                 key=lambda item: (item.sort_key, item.title),
@@ -965,13 +1038,22 @@ class ShortDramaSearcher:
         )
         return ordered
 
+    async def recommend_titles(self, limit: int = 20) -> tuple[str, ...]:
+        """兼容旧调用：只返回最新可播放短剧的剧名。"""
+        results = await self.recommend_results(limit)
+        return tuple(result.title for result in results)
+
     async def search(
         self,
         query: str,
         *,
+        media_type: str | None = None,
         prefer_full: bool = True,
     ) -> SearchResult | None:
-        cache_key = f"{normalize_title(query)}:{'full' if prefer_full else 'episodes'}"
+        cache_key = (
+            f"{media_type or '*'}:{normalize_title(query)}:"
+            f"{'full' if prefer_full else 'episodes'}"
+        )
         cached = self._cache.get(cache_key)
         if cached and cached[0] > time.monotonic():
             return cached[1]
@@ -1000,6 +1082,7 @@ class ShortDramaSearcher:
                         semaphore,
                         source,
                         query,
+                        media_type=media_type,
                     )
                     for source in self.sources
                 )
@@ -1021,6 +1104,7 @@ class ShortDramaSearcher:
                                 source,
                                 term,
                                 match_query=query,
+                                media_type=media_type,
                             )
                             for term in secondary_terms
                             for source in self.sources
@@ -1040,7 +1124,7 @@ class ShortDramaSearcher:
                         min_fuzzy_score=self.min_fuzzy_score,
                     )
             self._remember_variants(
-                normalize_title(query),
+                f"{media_type or '*'}:{normalize_title(query)}",
                 self._rank_variants(variant_candidates, 6),
             )
             best = await self._choose_best_result(
@@ -1228,6 +1312,7 @@ class ShortDramaSearcher:
         query: str,
         *,
         match_query: str | None = None,
+        media_type: str | None = None,
     ) -> list[SearchResult]:
         try:
             async with semaphore:
@@ -1246,6 +1331,7 @@ class ShortDramaSearcher:
                 match_query or query,
                 payload.get("list") or (),
                 source.name,
+                media_type,
             )
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
             logger.info(

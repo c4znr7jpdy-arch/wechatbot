@@ -1,4 +1,4 @@
-"""AstrBot 短剧搜索与微信播放卡片插件。"""
+"""AstrBot 分类影视、体育搜索与微信播放卡片插件。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from .search import (
     Episode,
     SearchResult,
     ShortDramaSearcher,
-    extract_query,
+    extract_media_query,
     extract_sports_query,
+    is_media_help_command,
     is_recommendation_command,
     known_title_hints,
     parse_episode_request,
@@ -100,6 +101,36 @@ def _compact_variants_card_text(
     return title, description
 
 
+def _media_help_text() -> str:
+    return "\n".join(
+        (
+            "🎬 影视资源使用帮助",
+            "命令与名称之间须留一个空格",
+            "",
+            "🔍 分类搜索",
+            "• 短剧 剧名（含AI漫剧）",
+            "• 电视剧 剧名",
+            "• 电影 片名",
+            "• 动漫 名称",
+            "• 综艺 名称",
+            "• 剧 名称（搜索全部分类）",
+            "",
+            "🏟️ 体育回放",
+            "• 体育 足球",
+            "• 体育 CBA2023",
+            "• 体育 完整赛事名",
+            "",
+            "✨ 最新推荐",
+            "• 短剧推荐（最新12部）",
+            "",
+            "⚙️ 选集与版本",
+            "• 电视剧 剧名 第12集",
+            "• 电影 片名 版本",
+            "• 电影 片名 版本2",
+        )
+    )
+
+
 class Main(star.Star):
     def __init__(
         self,
@@ -165,7 +196,7 @@ class Main(star.Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def short_drama(self, event: AstrMessageEvent):
-        """严格匹配“短剧 剧名”，搜索资源并发送微信链接卡片。"""
+        """严格匹配分类影视或体育命令并发送微信链接卡片。"""
         text = _strip_system_identity_prefix(event.get_message_str())
         if is_recommendation_command(text):
             event.stop_event()
@@ -174,16 +205,36 @@ class Main(star.Star):
                 event.get_sender_id(),
                 event.get_group_id() or "private",
             )
-            titles = await self.searcher.recommend_titles(20)
-            if not titles:
+            recommendations = await self.searcher.recommend_results(12)
+            if not recommendations:
                 yield event.plain_result("当前资源站暂时没有可推荐的短剧")
                 return
-            yield event.plain_result("\n".join(titles))
+            recommendations_url = self.player_server.create_recommendations_url(
+                recommendations
+            )
+            if recommendations_url and await self._send_recommendations_card(
+                event,
+                recommendations,
+                recommendations_url,
+            ):
+                logger.info(
+                    "[SHORT_DRAMA] recommendation card sent items=%s",
+                    len(recommendations),
+                )
+                return
+            yield event.plain_result(
+                "\n".join(result.title for result in recommendations)
+            )
+            return
+
+        if is_media_help_command(text):
+            event.stop_event()
+            yield event.plain_result(_media_help_text())
             return
 
         sports_query = extract_sports_query(text)
-        query = extract_query(text)
-        if query is None and sports_query is None:
+        media_request = extract_media_query(text)
+        if media_request is None and sports_query is None:
             return
 
         event.stop_event()
@@ -256,7 +307,10 @@ class Main(star.Star):
             yield event.plain_result("\n".join(lines))
             return
 
-        assert query is not None
+        assert media_request is not None
+        media_type, query = media_request
+        search_media_type = None if media_type == "剧" else media_type
+        media_label = "全分类资源" if media_type == "剧" else f"{media_type}资源"
 
         variant_request = parse_variant_request(query)
         if variant_request is not None:
@@ -264,7 +318,11 @@ class Main(star.Star):
             if len(title_query) > 60:
                 yield event.plain_result("剧名太长了，精简到 60 个字以内再搜")
                 return
-            variants = await self.searcher.search_variants(title_query, 6)
+            variants = await self.searcher.search_variants(
+                title_query,
+                6,
+                media_type=search_media_type,
+            )
             if not variants:
                 yield event.plain_result(
                     f"没找到《{title_query}》的其他可播放版本"
@@ -288,14 +346,14 @@ class Main(star.Star):
                     for index, result in enumerate(variants, start=1)
                 )
                 lines.append(
-                    f"发送“短剧 {title_query} 版本2”播放对应版本"
+                    f"发送“{media_type} {title_query} 版本2”播放对应版本"
                 )
                 yield event.plain_result("\n".join(lines))
                 return
             if variant_number > len(variants):
                 yield event.plain_result(
                     f"《{title_query}》目前只有 {len(variants)} 个可选版本，"
-                    f"请发送“短剧 {title_query} 版本”重新查看"
+                    f"请发送“{media_type} {title_query} 版本”重新查看"
                 )
                 return
 
@@ -335,13 +393,15 @@ class Main(star.Star):
             return
 
         logger.info(
-            "[SHORT_DRAMA] search query=%r sender=%s group=%s",
+            "[SHORT_DRAMA] search media=%s query=%r sender=%s group=%s",
+            media_type,
             title_query,
             event.get_sender_id(),
             event.get_group_id() or "private",
         )
         result = await self.searcher.search(
             title_query,
+            media_type=search_media_type,
             prefer_full=requested_episode is None,
         )
         if result is None:
@@ -350,16 +410,20 @@ class Main(star.Star):
                 names = "、".join(f"《{name}》" for name in hints)
                 yield event.plain_result(
                     f"已按可能剧名 {names} 做了模糊检索，"
-                    "但当前资源站暂无可播放资源"
+                    f"但当前资源站暂无可播放的{media_label}"
                 )
             else:
                 yield event.plain_result(
-                    f"没搜到《{title_query}》，换个完整剧名再试试"
+                    f"没搜到{media_label}《{title_query}》，换个完整名称再试试"
                 )
             return
 
         if requested_episode is None:
-            variants = self.searcher.cached_variants(title_query, 6)
+            variants = self.searcher.cached_variants(
+                title_query,
+                6,
+                media_type=search_media_type,
+            )
             variants_url = self.player_server.create_variants_url(
                 title_query,
                 variants,
@@ -371,7 +435,8 @@ class Main(star.Star):
                 variants_url,
             ):
                 logger.info(
-                    "[SHORT_DRAMA] variants card sent title=%r variants=%s",
+                    "[SHORT_DRAMA] variants card sent media=%s title=%r variants=%s",
+                    media_type,
                     title_query,
                     len(variants),
                 )
@@ -507,6 +572,48 @@ class Main(star.Star):
         except Exception as exc:
             logger.warning(
                 "[SHORT_DRAMA] collection card send failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return False
+
+    @staticmethod
+    async def _send_recommendations_card(
+        event: AstrMessageEvent,
+        recommendations: tuple[SearchResult, ...],
+        recommendations_url: str,
+    ) -> bool:
+        cover = next(
+            (result.cover_url for result in recommendations if result.cover_url),
+            _DEFAULT_COVER,
+        )
+        message = [
+            {
+                "type": "wechat_link_card",
+                "data": {
+                    "title": f"最新短剧推荐｜{len(recommendations)}部"[:48],
+                    "desc": "点击查看封面并选择播放",
+                    "url": recommendations_url,
+                    "image_url": cover,
+                },
+            }
+        ]
+        payload = {"message": message}
+        try:
+            if event.get_group_id():
+                payload["group_id"] = event.get_group_id()
+                response = await event.bot.call_action("send_group_msg", **payload)
+            else:
+                payload["user_id"] = event.get_sender_id()
+                response = await event.bot.call_action("send_private_msg", **payload)
+            if isinstance(response, dict):
+                return response.get("retcode", 0) == 0 and response.get(
+                    "status", "ok"
+                ) in {"ok", "success"}
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[SHORT_DRAMA] recommendation card send failed: %s: %s",
                 type(exc).__name__,
                 exc,
             )

@@ -226,6 +226,10 @@ class ShortDramaPlayerServer:
             self._handle_choose,
         )
         app.router.add_get(
+            f"{_ROUTE_PREFIX}/recommendations/{{token}}",
+            self._handle_recommendations,
+        )
+        app.router.add_get(
             f"{_ROUTE_PREFIX}/collection/{{token}}",
             self._handle_collection,
         )
@@ -325,6 +329,15 @@ class ShortDramaPlayerServer:
         token = self.collection_store.put(query_title, first_page)
         return f"{self.public_base_url}{_ROUTE_PREFIX}/collection/{token}"
 
+    def create_recommendations_url(
+        self,
+        recommendations: tuple[SearchResult, ...],
+    ) -> str | None:
+        if not self.started or not self.public_base_url or not recommendations:
+            return None
+        token = self.variant_store.put("最新短剧推荐", recommendations)
+        return f"{self.public_base_url}{_ROUTE_PREFIX}/recommendations/{token}"
+
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": True, "plugin": "jiang_short_drama", "player": True},
@@ -396,6 +409,18 @@ class ShortDramaPlayerServer:
             f"{self.public_base_url}{_ROUTE_PREFIX}/watch/{playlist_token}?ep=1"
         )
         raise web.HTTPFound(location=destination)
+
+    async def _handle_recommendations(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.variant_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="推荐链接已失效，请回到微信重新获取")
+        return web.Response(
+            text=_recommendation_html(record, token),
+            content_type="text/html",
+            charset="utf-8",
+            headers=_page_headers(),
+        )
 
     async def _load_collection_page(
         self,
@@ -631,6 +656,89 @@ def _variant_html(record: VariantRecord, token: str) -> str:
 </html>"""
 
 
+def _recommendation_html(record: VariantRecord, token: str) -> str:
+    safe_token = quote(token, safe="")
+    cards: list[str] = []
+    for index, result in enumerate(record.variants, start=1):
+        title = escape(result.title or "短剧")
+        category = escape(result.category or "短剧")
+        year = escape(result.year) if result.year else ""
+        source = escape(result.source or "未知来源")
+        cover = str(result.cover_url or "").strip()
+        parsed_cover = urlsplit(cover)
+        cover_html = ""
+        if parsed_cover.scheme in {"http", "https"} and parsed_cover.netloc:
+            cover_html = (
+                f'<img src="{escape(cover, quote=True)}" alt="{title}封面" '
+                'loading="lazy" referrerpolicy="no-referrer">'
+            )
+        tags = "".join(
+            f"<span>{value}</span>"
+            for value in (
+                year,
+                category,
+                f"{len(result.episodes)}集" if len(result.episodes) > 1 else "完整版",
+            )
+            if value
+        )
+        cards.append(
+            f"""
+      <a class="recommend-card" href="../choose/{safe_token}/{index}">
+        <div class="cover"><span>{escape((result.title or "剧")[0])}</span>{cover_html}<b>{index}</b></div>
+        <div class="info">
+          <strong>{title}</strong>
+          <div class="tags">{tags}</div>
+          <div class="source">{source}</div>
+          <div class="play">点击播放 <span>›</span></div>
+        </div>
+      </a>"""
+        )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>最新短剧推荐</title>
+  <style>
+    :root {{ color-scheme:dark; font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; --accent:#20c5a5; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; min-height:100vh; background:#0b0c0f; color:#f4f6f8; }}
+    main {{ width:min(100%,920px); margin:0 auto; padding:18px 12px max(28px,env(safe-area-inset-bottom)); }}
+    header {{ margin:0 2px 16px; }}
+    h1 {{ margin:0 0 6px; font-size:clamp(24px,6vw,34px); line-height:1.25; }}
+    header p {{ margin:0; color:#9298a2; font-size:14px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
+    .recommend-card {{ display:grid; grid-template-columns:112px minmax(0,1fr); min-height:158px; overflow:hidden; border:1px solid #292d34; border-radius:15px; color:inherit; background:#17191e; text-decoration:none; box-shadow:0 8px 24px rgba(0,0,0,.18); }}
+    .cover {{ position:relative; min-height:158px; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#68717d; background:linear-gradient(145deg,#232a33,#111419); font-size:40px; font-weight:750; }}
+    .cover img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+    .cover b {{ position:absolute; top:8px; left:8px; min-width:27px; height:27px; padding:0 7px; border-radius:9px; color:#061813; background:var(--accent); font-size:13px; line-height:27px; text-align:center; box-shadow:0 3px 10px rgba(0,0,0,.25); }}
+    .info {{ display:flex; min-width:0; flex-direction:column; padding:13px 12px 11px; }}
+    .info strong {{ display:-webkit-box; overflow:hidden; font-size:17px; line-height:1.4; -webkit-box-orient:vertical; -webkit-line-clamp:2; }}
+    .tags {{ display:flex; flex-wrap:wrap; gap:5px; margin-top:10px; }}
+    .tags span {{ padding:3px 7px; border:1px solid #343943; border-radius:7px; color:#c8cdd4; background:#202329; font-size:11px; }}
+    .source {{ overflow:hidden; margin-top:8px; color:#777f8a; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }}
+    .play {{ display:flex; align-items:center; justify-content:space-between; margin-top:auto; padding-top:9px; color:var(--accent); font-size:13px; font-weight:700; }}
+    .play span {{ font-size:23px; line-height:14px; }}
+    .tip {{ margin:16px 2px 0; color:#717883; font-size:12px; text-align:center; }}
+    @media (max-width:680px) {{
+      main {{ padding:16px 10px max(24px,env(safe-area-inset-bottom)); }}
+      .grid {{ grid-template-columns:1fr; gap:10px; }}
+      .recommend-card {{ grid-template-columns:108px minmax(0,1fr); min-height:154px; border-radius:13px; }}
+      .cover {{ min-height:154px; }}
+    }}
+    @media (hover:hover) {{ .recommend-card:hover {{ border-color:rgba(32,197,165,.7); transform:translateY(-1px); }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>最新短剧推荐</h1><p>共 {len(record.variants)} 部，按资源站更新时间排序</p></header>
+    <section class="grid">{''.join(cards)}</section>
+    <p class="tip">点击任一短剧即可进入播放器；推荐结果会随资源站更新。</p>
+  </main>
+</body>
+</html>"""
+
+
 def _collection_html(query_title: str) -> str:
     safe_query = escape(query_title or "赛事回放")
     return f"""<!doctype html>
@@ -675,7 +783,7 @@ def _collection_html(query_title: str) -> str:
     <section id="list" aria-live="polite"></section>
     <div class="footer"><div id="sentinel"></div><div id="status"></div><button id="more" type="button" disabled>加载更多</button></div>
   </main>
-  <script src="../collection.js?v=1.9.0"></script>
+  <script src="../collection.js?v=2.1.0"></script>
 </body>
 </html>"""
 
@@ -921,7 +1029,7 @@ def _player_html(title: str) -> str:
     </section>
   </main>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
-  <script src="../player.js?v=1.9.0"></script>
+  <script src="../player.js?v=2.1.0"></script>
 </body>
 </html>"""
 
