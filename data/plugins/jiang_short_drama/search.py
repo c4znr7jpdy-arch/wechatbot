@@ -10,6 +10,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, replace
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlsplit
@@ -40,9 +41,27 @@ class SearchResult:
     cover_url: str = ""
     year: str = ""
     actor: str = ""
+    category: str = ""
+    remarks: str = ""
     score: int = 0
     duration_seconds: float = 0.0
     is_full_version: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Recommendation:
+    title: str
+    source: str
+    updated_at: str
+    sort_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionPage:
+    query: str
+    page: int
+    items: tuple[SearchResult, ...]
+    has_more: bool
 
 
 # 来源取自用户提供的「短百影视」UserScript。只启用已验证能返回 JSON 的
@@ -59,9 +78,54 @@ DEFAULT_SOURCES: tuple[Source, ...] = (
 )
 
 _COMMAND_RE = re.compile(r"^短剧[ \t]+(?P<query>\S(?:.*\S)?)$")
+_SPORTS_COMMAND_RE = re.compile(r"^体育[ \t]+(?P<query>\S(?:.*\S)?)$")
+_RECOMMENDATION_COMMAND = "短剧推荐"
+_SHORT_DRAMA_TYPE_RE = re.compile(r"(?:短剧|漫剧)")
 _EPISODE_REQUEST_RE = re.compile(
     r"^(?P<title>.+?)[ \t]+第(?P<number>[1-9]\d{0,2})集$"
 )
+_VARIANT_REQUEST_RE = re.compile(
+    r"^(?P<title>.+?)[ \t]+版本(?:[ \t]*(?P<number>[1-9]\d?))?$"
+)
+_SPORTS_COLLECTION_RE = re.compile(
+    r"^(?P<league>CBA|NBA|WNBA|NCAA|浙BA|F1|UFC|WWE|篮球|足球|斯诺克|台球|"
+    r"网球|羽毛球|乒乓球|排球|英超|西甲|德甲|意甲|法甲|欧冠|中超|中甲|"
+    r"亚冠|世界杯|欧洲杯|美洲杯|奥运会|亚运会)"
+    r"(?:[ \t_-]*(?P<year>20\d{2}))?$",
+    re.IGNORECASE,
+)
+_SPORTS_CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "cba": ("篮球", "体育"),
+    "nba": ("篮球", "体育"),
+    "wnba": ("篮球", "体育"),
+    "ncaa": ("篮球", "体育"),
+    "浙ba": ("篮球", "体育"),
+    "篮球": ("篮球",),
+    "足球": ("足球",),
+    "英超": ("足球",),
+    "西甲": ("足球",),
+    "德甲": ("足球",),
+    "意甲": ("足球",),
+    "法甲": ("足球",),
+    "欧冠": ("足球",),
+    "中超": ("足球",),
+    "中甲": ("足球",),
+    "亚冠": ("足球",),
+    "世界杯": ("足球", "体育"),
+    "欧洲杯": ("足球", "体育"),
+    "美洲杯": ("足球", "体育"),
+    "斯诺克": ("斯诺克", "台球"),
+    "台球": ("斯诺克", "台球"),
+    "网球": ("网球",),
+    "羽毛球": ("羽毛球",),
+    "乒乓球": ("乒乓球",),
+    "排球": ("排球",),
+    "f1": ("赛车", "一级方程式", "体育"),
+    "ufc": ("格斗", "体育"),
+    "wwe": ("摔角", "格斗", "体育"),
+    "奥运会": ("奥运", "体育"),
+    "亚运会": ("亚运", "体育"),
+}
 _EPISODE_RANGE_RE = re.compile(
     r"第?\s*(?P<start>\d+)\s*(?:[-~～—至到]\s*(?P<end>\d+)\s*)?集"
 )
@@ -80,6 +144,11 @@ _BRACKET_NOISE_RE = re.compile(
     r"[（(【\[].*?(?:全集|高清|超清|4k|8k|国语|中字|完整版).*?[）)】\]]",
     re.IGNORECASE,
 )
+_VERSION_TITLE_SUFFIX_RE = re.compile(
+    r"(?:动画版|动画|动漫版|电视剧版|电视剧|真人版|新版|老版)$",
+    re.IGNORECASE,
+)
+_NON_VARIANT_RE = re.compile(r"(?:解说|预告|花絮|盘点|剪辑)")
 
 
 def extract_query(text: str) -> str | None:
@@ -90,12 +159,159 @@ def extract_query(text: str) -> str | None:
     return match.group("query")
 
 
+def extract_sports_query(text: str) -> str | None:
+    """严格解析“体育 + ASCII 空白 + 查询词”；单独“体育”不匹配。"""
+    match = _SPORTS_COMMAND_RE.fullmatch((text or "").rstrip())
+    if not match:
+        return None
+    return match.group("query")
+
+
+def is_recommendation_command(text: str) -> bool:
+    """只接受完全一致的“短剧推荐”，不容忍任何前后缀或空白。"""
+    return (text or "") == _RECOMMENDATION_COMMAND
+
+
+def _recommendation_sort_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.isdigit() and len(raw) == 10:
+        try:
+            return datetime.fromtimestamp(int(raw)).strftime("%Y%m%d%H%M%S")
+        except (OSError, OverflowError, ValueError):
+            return ""
+    digits = re.sub(r"\D", "", raw)
+    return digits[:14].ljust(14, "0") if len(digits) >= 8 else ""
+
+
+def _sports_replay_sort_key(title: str) -> str:
+    dates = re.findall(r"20\d{6}", normalize_title(title))
+    return max(dates) if dates else ""
+
+
+def _short_drama_type_ids(classes: Iterable[dict[str, Any]]) -> set[str]:
+    rows = [row for row in classes if isinstance(row, dict)]
+    selected = {
+        str(row.get("type_id"))
+        for row in rows
+        if _SHORT_DRAMA_TYPE_RE.search(str(row.get("type_name") or ""))
+    }
+    while True:
+        descendants = {
+            str(row.get("type_id"))
+            for row in rows
+            if str(row.get("type_pid")) in selected
+        }
+        expanded = selected | descendants
+        if expanded == selected:
+            return selected
+        selected = expanded
+
+
+def recommendation_candidates(
+    payload: dict[str, Any],
+    source_name: str,
+) -> list[Recommendation]:
+    """从资源站列表中提取有 HLS 播放地址的短剧，并保留更新时间。"""
+    type_ids = _short_drama_type_ids(payload.get("class") or ())
+    candidates: list[Recommendation] = []
+    for item in payload.get("list") or ():
+        if not isinstance(item, dict):
+            continue
+        type_name = str(item.get("type_name") or "")
+        type_id = str(item.get("type_id") or "")
+        if type_id not in type_ids and not _SHORT_DRAMA_TYPE_RE.search(type_name):
+            continue
+        title = str(item.get("vod_name") or "").strip()
+        if not title or not parse_episodes(str(item.get("vod_play_url") or "")):
+            continue
+        updated_at = str(
+            item.get("vod_time")
+            or item.get("vod_time_add")
+            or item.get("vod_addtime")
+            or ""
+        ).strip()
+        candidates.append(
+            Recommendation(
+                title=title,
+                source=source_name,
+                updated_at=updated_at,
+                sort_key=_recommendation_sort_key(updated_at),
+            )
+        )
+    return candidates
+
+
 def parse_episode_request(query: str) -> tuple[str, int | None]:
     """解析可选的“剧名 第N集”；普通剧名原样返回。"""
     match = _EPISODE_REQUEST_RE.fullmatch((query or "").strip())
     if not match:
         return (query or "").strip(), None
     return match.group("title").rstrip(), int(match.group("number"))
+
+
+def parse_variant_request(query: str) -> tuple[str, int | None] | None:
+    """解析“剧名 版本”或“剧名 版本2”的显式版本选择命令。"""
+    match = _VARIANT_REQUEST_RE.fullmatch((query or "").strip())
+    if not match:
+        return None
+    number = match.group("number")
+    return match.group("title").rstrip(), int(number) if number else None
+
+
+def parse_sports_collection_query(query: str) -> tuple[str, str | None] | None:
+    """识别“斯诺克”或“CBA2023”这类体育集合查询。"""
+    match = _SPORTS_COLLECTION_RE.fullmatch((query or "").strip())
+    if not match:
+        return None
+    return match.group("league").upper(), match.group("year") or None
+
+
+def is_sports_category(category: str) -> bool:
+    """判断资源站分类是否属于已支持的体育赛事分类。"""
+    normalized_category = normalize_title(category)
+    if not normalized_category:
+        return False
+    aliases = {
+        normalize_title(alias)
+        for values in _SPORTS_CATEGORY_ALIASES.values()
+        for alias in values
+        if alias
+    }
+    return any(alias in normalized_category for alias in aliases)
+
+
+def is_exact_sports_replay_result(query: str, result: SearchResult) -> bool:
+    """仅接受标题完全一致且分类属于体育的播放结果。"""
+    normalized_query = normalize_title(query)
+    return bool(
+        normalized_query
+        and normalize_title(result.title) == normalized_query
+        and is_sports_category(result.category)
+    )
+
+
+def is_sports_replay_item(
+    keyword: str,
+    year: str | None,
+    item: dict[str, Any],
+) -> bool:
+    """同时校验标题关键词、可选年份及体育分类，排除同名影视。"""
+    title = normalize_title(str(item.get("vod_name") or ""))
+    normalized_keyword = normalize_title(keyword)
+    if not normalized_keyword or normalized_keyword not in title:
+        return False
+    if year and year not in title:
+        return False
+    category = normalize_title(
+        str(item.get("type_name") or item.get("vod_class") or "")
+    )
+    aliases = _SPORTS_CATEGORY_ALIASES.get(
+        normalized_keyword,
+        (normalized_keyword,),
+    )
+    return any(alias in category for alias in aliases)
 
 
 def select_episode(result: SearchResult, requested: int | None) -> Episode | None:
@@ -266,7 +482,36 @@ def parse_episodes(play_url: Any) -> tuple[Episode, ...]:
     return tuple(best)
 
 
-def best_item(query: str, items: Iterable[Any], source_name: str) -> SearchResult | None:
+def _result_from_item(
+    item: dict[str, Any],
+    source_name: str,
+    score: int,
+) -> SearchResult | None:
+    title = str(item.get("vod_name") or "").strip()
+    episodes = parse_episodes(item.get("vod_play_url"))
+    if not title or not episodes:
+        return None
+    return SearchResult(
+        title=title,
+        source=source_name,
+        episodes=episodes,
+        cover_url=str(item.get("vod_pic") or "").strip(),
+        year=str(item.get("vod_year") or "").strip(),
+        actor=str(item.get("vod_actor") or "").strip(),
+        category=str(
+            item.get("type_name") or item.get("vod_class") or ""
+        ).strip(),
+        remarks=str(item.get("vod_remarks") or "").strip(),
+        score=score,
+    )
+
+
+def matching_items(
+    query: str,
+    items: Iterable[Any],
+    source_name: str,
+) -> list[SearchResult]:
+    """保留单个资源站中的全部可播放匹配项，供同名版本选择使用。"""
     candidates: list[SearchResult] = []
     for item in items:
         if not isinstance(item, dict):
@@ -275,20 +520,49 @@ def best_item(query: str, items: Iterable[Any], source_name: str) -> SearchResul
         score = title_score(query, title)
         if score <= 0:
             continue
-        episodes = parse_episodes(item.get("vod_play_url"))
-        if not episodes:
-            continue
-        candidates.append(
-            SearchResult(
-                title=title,
-                source=source_name,
-                episodes=episodes,
-                cover_url=str(item.get("vod_pic") or "").strip(),
-                year=str(item.get("vod_year") or "").strip(),
-                actor=str(item.get("vod_actor") or "").strip(),
-                score=score,
-            )
-        )
+        result = _result_from_item(item, source_name, score)
+        if result is not None:
+            candidates.append(result)
+    return candidates
+
+
+def variant_identity(result: SearchResult) -> tuple[str, str, str, str]:
+    """生成跨资源站版本指纹，忽略资源站名称和播放地址。"""
+    title_key = _VERSION_TITLE_SUFFIX_RE.sub("", normalize_title(result.title))
+    year_key = normalize_title(result.year)
+    if year_key and title_key.endswith(year_key):
+        title_key = title_key[: -len(year_key)]
+    category = normalize_title(result.category)
+    if re.search(r"(?:动漫|动画|漫剧)", category):
+        media_kind = "动画"
+    elif "电影" in category:
+        media_kind = "电影"
+    elif "剧" in category:
+        media_kind = "电视剧"
+    else:
+        media_kind = category
+    actors = [
+        normalize_title(actor)
+        for actor in re.split(r"[,，、/\s]+", result.actor)
+        if normalize_title(actor)
+    ]
+    lead_actor = actors[0] if actors else ""
+    return (
+        title_key,
+        year_key,
+        media_kind,
+        lead_actor,
+    )
+
+
+def is_selectable_variant(result: SearchResult) -> bool:
+    """过滤解说、预告等并非正片版本的搜索结果。"""
+    metadata = f"{result.title} {result.category} {result.remarks}"
+    return not _NON_VARIANT_RE.search(metadata)
+
+
+def best_item(query: str, items: Iterable[Any], source_name: str) -> SearchResult | None:
+    candidates = matching_items(query, items, source_name)
     if not candidates:
         return None
     return max(candidates, key=lambda result: (result.score, len(result.episodes)))
@@ -315,6 +589,381 @@ class ShortDramaSearcher:
         )
         self.min_fuzzy_score = max(1, min(int(min_fuzzy_score), 9_999))
         self._cache: dict[str, tuple[float, SearchResult | None]] = {}
+        self._variant_cache: dict[
+            str,
+            tuple[float, tuple[SearchResult, ...]],
+        ] = {}
+        self._collection_cache: dict[
+            tuple[str, int],
+            tuple[float, CollectionPage],
+        ] = {}
+        self._collection_source_pages: dict[tuple[str, str], int] = {}
+        self._sports_exact_cache: dict[
+            str,
+            tuple[float, SearchResult | None],
+        ] = {}
+        self._recommendation_cache: tuple[float, tuple[str, ...]] | None = None
+
+    async def search_sports_replay(self, query: str) -> SearchResult | None:
+        """只返回标题完全一致且分类为体育赛事的可播放结果。"""
+        normalized_query = normalize_title(query)
+        if not normalized_query:
+            return None
+        cached = self._sports_exact_cache.get(normalized_query)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds,
+            connect=min(5.0, self.timeout_seconds),
+        )
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/137.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        }
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            trust_env=False,
+        ) as session:
+            source_results = await asyncio.gather(
+                *(
+                    self._search_source_variants(
+                        session,
+                        semaphore,
+                        source,
+                        query,
+                    )
+                    for source in self.sources
+                )
+            )
+            exact_results = [
+                item
+                for source_result in source_results
+                for item in source_result
+                if is_exact_sports_replay_result(query, item)
+            ]
+            best = await self._choose_best_result(
+                session,
+                semaphore,
+                exact_results,
+                prefer_full=False,
+            )
+
+        now = time.monotonic()
+        self._sports_exact_cache = {
+            key: value
+            for key, value in self._sports_exact_cache.items()
+            if value[0] > now
+        }
+        self._sports_exact_cache[normalized_query] = (now + 10 * 60, best)
+        logger.info(
+            "[SHORT_DRAMA] sports exact query=%r candidates=%s selected=%s",
+            query,
+            len(exact_results),
+            best.title if best else "none",
+        )
+        return best
+
+    async def search_collection_page(
+        self,
+        query: str,
+        page: int = 1,
+    ) -> CollectionPage:
+        """按需读取赛事回放的一页；只保留同时命中联赛与年份的正片。"""
+        parsed = parse_sports_collection_query(query)
+        page_number = max(1, int(page))
+        if parsed is None:
+            return CollectionPage(query=query, page=page_number, items=(), has_more=False)
+        league, year = parsed
+        cache_query = f"{league}{year or ''}"
+        cache_key = (cache_query, page_number)
+        cached = self._collection_cache.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
+        if page_number == 1:
+            sources = self.sources
+        else:
+            known = [
+                source
+                for source in self.sources
+                if self._collection_source_pages.get(
+                    (cache_query, source.name),
+                    page_number,
+                )
+                >= page_number
+            ]
+            sources = tuple(known)
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds,
+            connect=min(5.0, self.timeout_seconds),
+        )
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/137.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        }
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            trust_env=False,
+        ) as session:
+            source_pages = await asyncio.gather(
+                *(
+                    self._collection_source_page(
+                        session,
+                        semaphore,
+                        source,
+                        league,
+                        year,
+                        page_number,
+                    )
+                    for source in sources
+                )
+            )
+
+        candidates: list[SearchResult] = []
+        has_more = False
+        for source_name, items, page_count in source_pages:
+            self._collection_source_pages[(cache_query, source_name)] = page_count
+            candidates.extend(items)
+            has_more = has_more or page_number < page_count
+        unique: dict[str, SearchResult] = {}
+        for item in sorted(
+            candidates,
+            key=lambda result: (_sports_replay_sort_key(result.title), result.title),
+            reverse=True,
+        ):
+            unique.setdefault(normalize_title(item.title), item)
+        result = CollectionPage(
+            query=cache_query,
+            page=page_number,
+            items=tuple(unique.values()),
+            has_more=has_more,
+        )
+        now = time.monotonic()
+        self._collection_cache = {
+            key: value
+            for key, value in self._collection_cache.items()
+            if value[0] > now
+        }
+        self._collection_cache[cache_key] = (now + 10 * 60, result)
+        logger.info(
+            "[SHORT_DRAMA] collection query=%s page=%s items=%s more=%s",
+            cache_query,
+            page_number,
+            len(result.items),
+            result.has_more,
+        )
+        return result
+
+    async def search_variants(
+        self,
+        query: str,
+        limit: int = 6,
+    ) -> tuple[SearchResult, ...]:
+        """返回可供用户辨认和选择的同名/近名版本。"""
+        wanted = max(1, min(int(limit), 10))
+        cache_key = normalize_title(query)
+        cached = self._variant_cache.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1][:wanted]
+
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds,
+            connect=min(5.0, self.timeout_seconds),
+        )
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/137.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        }
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            trust_env=False,
+        ) as session:
+            source_results = await asyncio.gather(
+                *(
+                    self._search_source_variants(
+                        session,
+                        semaphore,
+                        source,
+                        query,
+                    )
+                    for source in self.sources
+                )
+            )
+            candidates = [item for result in source_results for item in result]
+            variants = self._rank_variants(candidates, wanted)
+            if not variants:
+                terms = fuzzy_search_terms(query)
+                if terms:
+                    secondary_results = await asyncio.gather(
+                        *(
+                            self._search_source_variants(
+                                session,
+                                semaphore,
+                                source,
+                                term,
+                                match_query=query,
+                            )
+                            for term in terms
+                            for source in self.sources
+                        )
+                    )
+                    candidates = [
+                        item
+                        for result in secondary_results
+                        for item in result
+                    ]
+                    variants = self._rank_variants(candidates, wanted)
+
+        self._remember_variants(cache_key, variants)
+        logger.info(
+            "[SHORT_DRAMA] variants query=%r selected=%s candidates=%s",
+            query,
+            len(variants),
+            len(candidates),
+        )
+        return variants
+
+    def cached_variants(
+        self,
+        query: str,
+        limit: int = 6,
+    ) -> tuple[SearchResult, ...]:
+        """读取普通搜索顺带生成的版本候选，不发起网络请求。"""
+        cached = self._variant_cache.get(normalize_title(query))
+        if not cached or cached[0] <= time.monotonic():
+            return ()
+        return cached[1][: max(1, min(int(limit), 10))]
+
+    def _rank_variants(
+        self,
+        candidates: Iterable[SearchResult],
+        wanted: int,
+    ) -> tuple[SearchResult, ...]:
+        available = [
+            item
+            for item in candidates
+            if item.score >= self.min_fuzzy_score
+            and is_selectable_variant(item)
+        ]
+        ordered = sorted(
+            available,
+            key=lambda item: (
+                item.score,
+                bool(item.year),
+                bool(item.category),
+                bool(item.actor),
+                len(item.episodes),
+            ),
+            reverse=True,
+        )
+        unique: dict[tuple[str, str, str, str], SearchResult] = {}
+        for item in ordered:
+            key = variant_identity(item)
+            unique.setdefault(key, item)
+            if len(unique) >= wanted:
+                break
+        return tuple(unique.values())
+
+    def _remember_variants(
+        self,
+        cache_key: str,
+        variants: tuple[SearchResult, ...],
+    ) -> None:
+        now = time.monotonic()
+        self._variant_cache = {
+            key: value
+            for key, value in self._variant_cache.items()
+            if value[0] > now
+        }
+        self._variant_cache[cache_key] = (now + 10 * 60, variants)
+
+    async def recommend_titles(self, limit: int = 20) -> tuple[str, ...]:
+        """返回资源站最近更新且可播放的短剧剧名。"""
+        wanted = max(1, min(int(limit), 50))
+        cached = self._recommendation_cache
+        if cached and cached[0] > time.monotonic() and len(cached[1]) >= wanted:
+            return cached[1][:wanted]
+
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds,
+            connect=min(5.0, self.timeout_seconds),
+        )
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/137.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        }
+        candidates: list[Recommendation] = []
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            trust_env=False,
+        ) as session:
+            for page in range(1, 4):
+                page_results = await asyncio.gather(
+                    *(
+                        self._recommendation_source_page(
+                            session,
+                            semaphore,
+                            source,
+                            page,
+                        )
+                        for source in self.sources
+                    )
+                )
+                candidates.extend(
+                    recommendation
+                    for result in page_results
+                    for recommendation in result
+                )
+                unique_count = len(
+                    {normalize_title(item.title) for item in candidates}
+                )
+                if unique_count >= wanted:
+                    break
+
+        unique: dict[str, Recommendation] = {}
+        for candidate in candidates:
+            key = normalize_title(candidate.title)
+            if not key:
+                continue
+            current = unique.get(key)
+            if current is None or candidate.sort_key > current.sort_key:
+                unique[key] = candidate
+        ordered = tuple(
+            item.title
+            for item in sorted(
+                unique.values(),
+                key=lambda item: (item.sort_key, item.title),
+                reverse=True,
+            )[:wanted]
+        )
+        self._recommendation_cache = (time.monotonic() + 10 * 60, ordered)
+        logger.info(
+            "[SHORT_DRAMA] recommendations selected=%s candidates=%s",
+            len(ordered),
+            len(candidates),
+        )
+        return ordered
 
     async def search(
         self,
@@ -344,13 +993,19 @@ class ShortDramaSearcher:
             headers=headers,
             trust_env=False,
         ) as session:
-            results = await asyncio.gather(
+            source_results = await asyncio.gather(
                 *(
-                    self._search_source(session, semaphore, source, query)
+                    self._search_source_variants(
+                        session,
+                        semaphore,
+                        source,
+                        query,
+                    )
                     for source in self.sources
                 )
             )
-            available = [result for result in results if result is not None]
+            available = [item for result in source_results for item in result]
+            variant_candidates = available
             pool, exact_match = candidate_pool(
                 available,
                 min_fuzzy_score=self.min_fuzzy_score,
@@ -360,7 +1015,7 @@ class ShortDramaSearcher:
                 if secondary_terms:
                     secondary_results = await asyncio.gather(
                         *(
-                            self._search_source(
+                            self._search_source_variants(
                                 session,
                                 semaphore,
                                 source,
@@ -374,15 +1029,20 @@ class ShortDramaSearcher:
                     combined = self._dedupe_results(
                         available
                         + [
-                            result
+                            item
                             for result in secondary_results
-                            if result is not None
+                            for item in result
                         ]
                     )
+                    variant_candidates = combined
                     pool, exact_match = candidate_pool(
                         combined,
                         min_fuzzy_score=self.min_fuzzy_score,
                     )
+            self._remember_variants(
+                normalize_title(query),
+                self._rank_variants(variant_candidates, 6),
+            )
             best = await self._choose_best_result(
                 session,
                 semaphore,
@@ -560,7 +1220,7 @@ class ShortDramaSearcher:
         except ValueError:
             return False
 
-    async def _search_source(
+    async def _search_source_variants(
         self,
         session: aiohttp.ClientSession,
         semaphore: asyncio.Semaphore,
@@ -568,7 +1228,7 @@ class ShortDramaSearcher:
         query: str,
         *,
         match_query: str | None = None,
-    ) -> SearchResult | None:
+    ) -> list[SearchResult]:
         try:
             async with semaphore:
                 async with session.get(
@@ -577,31 +1237,106 @@ class ShortDramaSearcher:
                     allow_redirects=True,
                 ) as response:
                     if response.status != 200:
-                        logger.info(
-                            "[SHORT_DRAMA] source=%s status=%s",
-                            source.name,
-                            response.status,
-                        )
-                        return None
+                        return []
                     raw = await response.read()
                     if len(raw) > 5_000_000:
-                        logger.info(
-                            "[SHORT_DRAMA] source=%s response too large: %s bytes",
-                            source.name,
-                            len(raw),
-                        )
-                        return None
+                        return []
             payload = _decode_json(raw)
-            return best_item(
+            return matching_items(
                 match_query or query,
                 payload.get("list") or (),
                 source.name,
             )
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
             logger.info(
-                "[SHORT_DRAMA] source=%s unavailable: %s: %s",
+                "[SHORT_DRAMA] variant source=%s unavailable: %s: %s",
                 source.name,
                 type(exc).__name__,
                 exc,
             )
-            return None
+            return []
+
+    async def _collection_source_page(
+        self,
+        session: aiohttp.ClientSession,
+        semaphore: asyncio.Semaphore,
+        source: Source,
+        league: str,
+        year: str | None,
+        page: int,
+    ) -> tuple[str, list[SearchResult], int]:
+        try:
+            async with semaphore:
+                async with session.get(
+                    source.url,
+                    params={
+                        "ac": "detail",
+                        "wd": f"{league} {year}" if year else league,
+                        "pg": page,
+                    },
+                    allow_redirects=True,
+                ) as response:
+                    if response.status != 200:
+                        return source.name, [], 0
+                    raw = await response.read()
+                    if len(raw) > 5_000_000:
+                        return source.name, [], 0
+            payload = _decode_json(raw)
+            try:
+                page_count = max(0, int(payload.get("pagecount") or 0))
+            except (TypeError, ValueError):
+                page_count = 0
+            items: list[SearchResult] = []
+            for raw_item in payload.get("list") or ():
+                if not isinstance(raw_item, dict):
+                    continue
+                if not is_sports_replay_item(league, year, raw_item):
+                    continue
+                result = _result_from_item(raw_item, source.name, EXACT_TITLE_SCORE)
+                if result is not None and is_selectable_variant(result):
+                    items.append(result)
+            return source.name, items, page_count
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
+            logger.info(
+                "[SHORT_DRAMA] collection source=%s page=%s unavailable: %s: %s",
+                source.name,
+                page,
+                type(exc).__name__,
+                exc,
+            )
+            return source.name, [], 0
+
+    async def _recommendation_source_page(
+        self,
+        session: aiohttp.ClientSession,
+        semaphore: asyncio.Semaphore,
+        source: Source,
+        page: int,
+    ) -> list[Recommendation]:
+        try:
+            async with semaphore:
+                async with session.get(
+                    source.url,
+                    params={"ac": "detail", "pg": page},
+                    allow_redirects=True,
+                ) as response:
+                    if response.status != 200:
+                        logger.info(
+                            "[SHORT_DRAMA] recommendation source=%s page=%s status=%s",
+                            source.name,
+                            page,
+                            response.status,
+                        )
+                        return []
+                    raw = await response.read()
+                    if len(raw) > 5_000_000:
+                        return []
+            return recommendation_candidates(_decode_json(raw), source.name)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
+            logger.info(
+                "[SHORT_DRAMA] recommendation source=%s unavailable: %s: %s",
+                source.name,
+                type(exc).__name__,
+                exc,
+            )
+            return []

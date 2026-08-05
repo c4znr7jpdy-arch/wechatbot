@@ -2,27 +2,46 @@ from __future__ import annotations
 
 import unittest
 
+from .main import _compact_play_card_text, _compact_variants_card_text
 from .search import (
+    CollectionPage,
     Episode,
     SearchResult,
     best_item,
     candidate_pool,
     extract_query,
+    extract_sports_query,
     fuzzy_search_terms,
+    is_exact_sports_replay_result,
+    is_recommendation_command,
+    is_selectable_variant,
+    is_sports_category,
+    is_sports_replay_item,
     known_title_hints,
     master_playlist_variant,
+    matching_items,
     normalize_title,
     parse_episodes,
     parse_episode_request,
+    parse_sports_collection_query,
+    parse_variant_request,
     playlist_duration_seconds,
+    recommendation_candidates,
     select_episode,
     title_score,
+    variant_identity,
 )
 from .player_server import (
+    _COLLECTION_JAVASCRIPT,
     _PLAYER_JAVASCRIPT,
+    _collection_html,
     _player_html,
+    _variant_html,
+    CollectionStore,
     EpisodePlaylistStore,
     ShortDramaPlayerServer,
+    VariantRecord,
+    VariantStore,
     validate_public_base_url,
 )
 from .watch_url import build_watch_url
@@ -37,6 +56,25 @@ class CommandMatchTests(unittest.TestCase):
         self.assertIsNone(extract_query("/短剧 闪婚"))
         self.assertIsNone(extract_query(" 短剧 闪婚"))
 
+    def test_sports_command_requires_query_and_ascii_space(self):
+        self.assertEqual(extract_sports_query("体育 斯诺克"), "斯诺克")
+        self.assertEqual(
+            extract_sports_query("体育   CBA2023   "),
+            "CBA2023",
+        )
+        self.assertIsNone(extract_sports_query("体育"))
+        self.assertIsNone(extract_sports_query("体育 "))
+        self.assertIsNone(extract_sports_query("体育足球"))
+        self.assertIsNone(extract_sports_query("体育　足球"))
+        self.assertIsNone(extract_sports_query("/体育 足球"))
+
+    def test_recommendation_command_requires_exact_full_match(self):
+        self.assertTrue(is_recommendation_command("短剧推荐"))
+        self.assertFalse(is_recommendation_command("短剧推荐 "))
+        self.assertFalse(is_recommendation_command(" 短剧推荐"))
+        self.assertFalse(is_recommendation_command("/短剧推荐"))
+        self.assertFalse(is_recommendation_command("短剧 推荐"))
+
     def test_normalize_removes_quality_suffix(self):
         self.assertEqual(normalize_title("闪婚（全集高清）"), "闪婚")
 
@@ -50,8 +88,187 @@ class CommandMatchTests(unittest.TestCase):
             ("可否许我再少年", 12),
         )
 
+    def test_variant_request_requires_separate_version_suffix(self):
+        self.assertEqual(parse_variant_request("三国演义 版本"), ("三国演义", None))
+        self.assertEqual(parse_variant_request("三国演义 版本2"), ("三国演义", 2))
+        self.assertEqual(parse_variant_request("三国演义 版本 3"), ("三国演义", 3))
+        self.assertIsNone(parse_variant_request("三国演义版本2"))
+        self.assertIsNone(parse_variant_request("三国演义 版本0"))
+
+    def test_sports_collection_query_accepts_league_and_year(self):
+        self.assertEqual(parse_sports_collection_query("CBA2023"), ("CBA", "2023"))
+        self.assertEqual(parse_sports_collection_query("nba 2024"), ("NBA", "2024"))
+        self.assertEqual(parse_sports_collection_query("英超2025"), ("英超", "2025"))
+        self.assertEqual(parse_sports_collection_query("CBA"), ("CBA", None))
+        self.assertEqual(parse_sports_collection_query("斯诺克"), ("斯诺克", None))
+        self.assertEqual(parse_sports_collection_query("足球2024"), ("足球", "2024"))
+        self.assertIsNone(parse_sports_collection_query("CBA20235"))
+
+    def test_sports_collection_filters_same_name_movies(self):
+        self.assertTrue(
+            is_sports_replay_item(
+                "斯诺克",
+                None,
+                {"vod_name": "2024斯诺克大师赛", "type_name": "台球"},
+            )
+        )
+        self.assertFalse(
+            is_sports_replay_item(
+                "斯诺克",
+                None,
+                {"vod_name": "我爱斯诺克", "type_name": "剧情片"},
+            )
+        )
+        self.assertTrue(
+            is_sports_replay_item(
+                "足球",
+                "2024",
+                {"vod_name": "足球热身赛 A队vsB队20240811", "type_name": "足球"},
+            )
+        )
+        self.assertFalse(
+            is_sports_replay_item(
+                "足球",
+                None,
+                {"vod_name": "足球爸爸", "type_name": "喜剧片"},
+            )
+        )
+
+    def test_sports_category_excludes_non_sports_media(self):
+        self.assertTrue(is_sports_category("足球"))
+        self.assertTrue(is_sports_category("综合体育"))
+        self.assertTrue(is_sports_category("斯诺克/台球"))
+        self.assertFalse(is_sports_category("剧情片"))
+        self.assertFalse(is_sports_category("国产动漫"))
+
+    def test_exact_sports_replay_requires_exact_title_and_sports_category(self):
+        result = SearchResult(
+            title="2025斯诺克世锦赛第一轮A选手VS B选手",
+            source="测试源",
+            episodes=(Episode("正片", "https://example.com/replay.m3u8"),),
+            category="台球",
+        )
+        self.assertTrue(
+            is_exact_sports_replay_result(
+                "2025斯诺克世锦赛第一轮A选手VS B选手",
+                result,
+            )
+        )
+        self.assertFalse(
+            is_exact_sports_replay_result("2025斯诺克世锦赛", result)
+        )
+        self.assertFalse(
+            is_exact_sports_replay_result(
+                result.title,
+                SearchResult(
+                    title=result.title,
+                    source="测试源",
+                    episodes=result.episodes,
+                    category="剧情片",
+                ),
+            )
+        )
+
+
+class CardTextTests(unittest.TestCase):
+    def test_episode_card_text_is_compact(self):
+        episodes = tuple(
+            Episode(f"第{index}集", f"https://example.com/{index}.m3u8")
+            for index in range(1, 6)
+        )
+        current = Episode("第1-20集", "https://example.com/current.m3u8")
+        result = SearchResult(
+            title="重回末日前",
+            source="红牛资源",
+            episodes=episodes,
+            year="2024",
+            category="短剧",
+        )
+        self.assertEqual(
+            _compact_play_card_text(result, current),
+            ("重回末日前｜第1-20集", "2024 · 短剧 · 共5集 · 点击播放"),
+        )
+
+    def test_full_version_card_text_keeps_duration(self):
+        episode = Episode("正片", "https://example.com/full.m3u8")
+        result = SearchResult(
+            title="测试完整版",
+            source="量子资源",
+            episodes=(episode,),
+            year="2025",
+            category="短剧",
+            duration_seconds=9_000,
+            is_full_version=True,
+        )
+        self.assertEqual(
+            _compact_play_card_text(result, episode),
+            ("测试完整版｜完整版", "2025 · 短剧 · 约150分钟 · 点击播放"),
+        )
+
+    def test_variants_card_text_deduplicates_and_sorts_years(self):
+        episode = Episode("正片", "https://example.com/play.m3u8")
+        variants = tuple(
+            SearchResult(
+                title=f"红楼梦版本{index}",
+                source="测试源",
+                episodes=(episode,),
+                year=year,
+                category=category,
+            )
+            for index, (year, category) in enumerate(
+                (
+                    ("2010", "国产剧"),
+                    ("1987", "国产剧"),
+                    ("2018", "剧情片"),
+                    ("2018", "伦理片"),
+                    ("1987", "电视剧"),
+                    ("", "动画片"),
+                ),
+                start=1,
+            )
+        )
+        self.assertEqual(
+            _compact_variants_card_text("红楼梦", variants),
+            ("红楼梦｜6个版本", "1987、2010、2018 · 点击选择版本"),
+        )
+
 
 class PlayUrlTests(unittest.TestCase):
+    def test_recommendations_include_short_drama_descendants_with_hls(self):
+        payload = {
+            "class": [
+                {"type_id": 58, "type_pid": 0, "type_name": "短剧大全"},
+                {"type_id": 67, "type_pid": 58, "type_name": "现代言情"},
+                {"type_id": 20, "type_pid": 0, "type_name": "电影片"},
+            ],
+            "list": [
+                {
+                    "vod_name": "今日短剧",
+                    "type_id": 67,
+                    "type_name": "现代言情",
+                    "vod_time": "2026-08-05 10:00:00",
+                    "vod_play_url": "第1集$https://example.com/1.m3u8",
+                },
+                {
+                    "vod_name": "没有HLS的短剧",
+                    "type_id": 58,
+                    "type_name": "短剧大全",
+                    "vod_time": "2026-08-05 10:01:00",
+                    "vod_play_url": "正片$https://example.com/video.mp4",
+                },
+                {
+                    "vod_name": "普通电影",
+                    "type_id": 20,
+                    "type_name": "电影片",
+                    "vod_time": "2026-08-05 10:02:00",
+                    "vod_play_url": "正片$https://example.com/movie.m3u8",
+                },
+            ],
+        }
+        candidates = recommendation_candidates(payload, "测试源")
+        self.assertEqual([item.title for item in candidates], ["今日短剧"])
+        self.assertEqual(candidates[0].sort_key, "20260805100000")
+
     def test_selects_longest_hls_route(self):
         value = (
             "正片$https://example.com/video.mp4$$$"
@@ -75,6 +292,89 @@ class PlayUrlTests(unittest.TestCase):
         result = best_item("闪婚", items, "测试源")
         self.assertIsNotNone(result)
         self.assertEqual(result.title, "闪婚")
+
+    def test_matching_items_keep_version_metadata(self):
+        items = [
+            {
+                "vod_name": "三国演义",
+                "vod_year": "1994",
+                "type_name": "国产剧",
+                "vod_actor": "唐国强,孙彦军",
+                "vod_remarks": "84集全",
+                "vod_play_url": "1$https://example.com/1994.m3u8",
+            },
+            {
+                "vod_name": "三国演义",
+                "vod_year": "2009",
+                "type_name": "国产动漫",
+                "vod_actor": "",
+                "vod_remarks": "86集全",
+                "vod_play_url": "1$https://example.com/cartoon.m3u8",
+            },
+        ]
+        results = matching_items("三国演义", items, "测试源")
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].year, "1994")
+        self.assertEqual(results[0].category, "国产剧")
+        self.assertEqual(results[0].remarks, "84集全")
+        self.assertNotEqual(
+            variant_identity(results[0]),
+            variant_identity(results[1]),
+        )
+
+    def test_variant_identity_deduplicates_same_version_across_sources(self):
+        first = SearchResult(
+            title="三国演义",
+            source="甲源",
+            episodes=(Episode("第1集", "https://a.example/1.m3u8"),),
+            year="1994",
+            actor="唐国强, 孙彦军",
+            category="国产剧",
+        )
+        second = SearchResult(
+            title="三国演义",
+            source="乙源",
+            episodes=(Episode("第1集", "https://b.example/1.m3u8"),),
+            year="1994",
+            actor="唐国强、孙彦军",
+            category="国产剧",
+        )
+        self.assertEqual(variant_identity(first), variant_identity(second))
+
+    def test_variant_identity_normalizes_animation_labels(self):
+        first = SearchResult(
+            title="三国演义",
+            source="甲源",
+            episodes=(Episode("第1集", "https://a.example/1.m3u8"),),
+            year="2017",
+            actor="杨默,图特哈蒙",
+            category="中国动漫",
+        )
+        second = SearchResult(
+            title="三国演义动画版",
+            source="乙源",
+            episodes=(Episode("第1集", "https://b.example/1.m3u8"),),
+            year="2017",
+            actor="杨默,张震",
+            category="国产动画",
+        )
+        self.assertEqual(variant_identity(first), variant_identity(second))
+
+    def test_variant_list_filters_commentary_not_the_main_video(self):
+        commentary = SearchResult(
+            title="三国演义1994[电影解说]",
+            source="测试源",
+            episodes=(Episode("正片", "https://a.example/comment.m3u8"),),
+            category="电影解说",
+        )
+        series = SearchResult(
+            title="三国演义",
+            source="测试源",
+            episodes=(Episode("第1集", "https://a.example/series.m3u8"),),
+            category="国产剧",
+        )
+        self.assertFalse(is_selectable_variant(commentary))
+        self.assertTrue(is_selectable_variant(series))
 
     def test_exact_pool_excludes_longer_fuzzy_sequel(self):
         exact = SearchResult(
@@ -227,6 +527,24 @@ class EpisodePlayerTests(unittest.TestCase):
         self.assertEqual(store.get(token, now=159).title, "测试短剧")
         self.assertIsNone(store.get(token, now=160))
 
+    def test_variant_token_expires(self):
+        store = VariantStore(ttl_seconds=60)
+        token = store.put("测试短剧", (self.result,), now=100)
+        self.assertEqual(store.get(token, now=159).query_title, "测试短剧")
+        self.assertIsNone(store.get(token, now=160))
+
+    def test_collection_token_keeps_first_page_and_expires(self):
+        page = CollectionPage(
+            query="CBA2023",
+            page=1,
+            items=(self.result,),
+            has_more=True,
+        )
+        store = CollectionStore(ttl_seconds=60)
+        token = store.put("CBA2023", page, now=100)
+        self.assertEqual(store.get(token, now=159).pages[1], page)
+        self.assertIsNone(store.get(token, now=160))
+
     def test_player_url_selects_requested_episode_without_embedding_streams(self):
         server = ShortDramaPlayerServer(
             public_base_url="https://player.example",
@@ -249,6 +567,81 @@ class EpisodePlayerTests(unittest.TestCase):
             episodes=(self.result.episodes[0],),
         )
         self.assertIsNone(server.create_watch_url(single, single.episodes[0]))
+
+    def test_variants_url_uses_token_without_embedding_streams(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        other = SearchResult(
+            title="测试短剧动画版",
+            source="动画源",
+            episodes=(Episode("第01集", "https://cdn.example/a.m3u8"),),
+            category="国产动漫",
+        )
+        url = server.create_variants_url("测试短剧", (self.result, other))
+        self.assertIsNotNone(url)
+        self.assertTrue(
+            url.startswith("https://player.example/short-drama/variants/")
+        )
+        self.assertNotIn("m3u8", url)
+
+    def test_collection_url_uses_token_without_embedding_streams(self):
+        server = ShortDramaPlayerServer(
+            public_base_url="https://player.example",
+        )
+        server.started = True
+        page = CollectionPage(
+            query="CBA2023",
+            page=1,
+            items=(self.result,),
+            has_more=True,
+        )
+        url = server.create_collection_url("CBA2023", page)
+        self.assertIsNotNone(url)
+        self.assertTrue(
+            url.startswith("https://player.example/short-drama/collection/")
+        )
+        self.assertNotIn("m3u8", url)
+
+    def test_variant_page_shows_covers_metadata_and_choice_links(self):
+        live_action = SearchResult(
+            title="三国演义",
+            source="电视剧源",
+            episodes=(Episode("第01集", "https://cdn.example/tv.m3u8"),),
+            cover_url="https://img.example/tv.jpg",
+            year="1994",
+            actor="唐国强,鲍国安",
+            category="国产剧",
+        )
+        animation = SearchResult(
+            title="三国演义动画版",
+            source="动画源",
+            episodes=(Episode("第01集", "https://cdn.example/anime.m3u8"),),
+            cover_url="https://img.example/anime.jpg",
+            year="2017",
+            actor="杨默,图特哈蒙",
+            category="国产动漫",
+        )
+        record = VariantRecord(
+            query_title="三国演义",
+            variants=(live_action, animation),
+            expires_at=999,
+        )
+        html = _variant_html(record, "safe-token")
+        self.assertIn("选择《三国演义》的版本", html)
+        self.assertIn("https://img.example/tv.jpg", html)
+        self.assertIn("1994年", html)
+        self.assertIn("唐国强、鲍国安", html)
+        self.assertIn("../choose/safe-token/2", html)
+
+    def test_collection_page_uses_lazy_external_script(self):
+        html = _collection_html("CBA2023")
+        self.assertIn("CBA2023 比赛回放", html)
+        self.assertIn('id="list"', html)
+        self.assertIn('loading = \'lazy\'', _COLLECTION_JAVASCRIPT)
+        self.assertIn("IntersectionObserver", _COLLECTION_JAVASCRIPT)
+        self.assertIn("collection-api", _COLLECTION_JAVASCRIPT)
 
     def test_mobile_player_uses_custom_episode_sheet(self):
         html = _player_html("测试短剧")
@@ -283,6 +676,41 @@ class EpisodePlayerTests(unittest.TestCase):
         self.assertLess(episode_sheet, below_player)
         self.assertIn("videoShell.requestFullscreen", _PLAYER_JAVASCRIPT)
         self.assertIn("videoShell.classList.contains('pseudo-fullscreen')", _PLAYER_JAVASCRIPT)
+
+
+class CollectionPlayerAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lazy_pages_drop_titles_already_shown(self):
+        first_item = SearchResult(
+            title="CBA A队VS B队 20231231",
+            source="甲源",
+            episodes=(Episode("正片", "https://a.example/1.m3u8"),),
+        )
+        next_item = SearchResult(
+            title="CBA C队VS D队 20231230",
+            source="乙源",
+            episodes=(Episode("正片", "https://b.example/1.m3u8"),),
+        )
+        first_page = CollectionPage(
+            query="CBA2023",
+            page=1,
+            items=(first_item,),
+            has_more=True,
+        )
+        server = ShortDramaPlayerServer(public_base_url="https://player.example")
+        token = server.collection_store.put("CBA2023", first_page)
+        record = server.collection_store.get(token)
+
+        async def loader(_query: str, page: int) -> CollectionPage:
+            return CollectionPage(
+                query="CBA2023",
+                page=page,
+                items=(first_item, next_item),
+                has_more=False,
+            )
+
+        server.collection_loader = loader
+        loaded = await server._load_collection_page(record, 2)
+        self.assertEqual([item.title for item in loaded.items], [next_item.title])
 
 
 if __name__ == "__main__":

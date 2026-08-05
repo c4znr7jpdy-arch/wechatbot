@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from html import escape
-from urllib.parse import urlencode, urlsplit
+from typing import Awaitable, Callable
+from urllib.parse import quote, urlencode, urlsplit
 
 from aiohttp import web
 
-from .search import Episode, SearchResult
+from .search import CollectionPage, Episode, SearchResult, normalize_title
 
 
 logger = logging.getLogger("jiang_short_drama")
@@ -24,6 +26,20 @@ class PlaylistRecord:
     source: str
     cover_url: str
     episodes: tuple[Episode, ...]
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class VariantRecord:
+    query_title: str
+    variants: tuple[SearchResult, ...]
+    expires_at: float
+
+
+@dataclass(slots=True)
+class CollectionRecord:
+    query_title: str
+    pages: dict[int, CollectionPage]
     expires_at: float
 
 
@@ -68,6 +84,92 @@ class EpisodePlaylistStore:
             self._items.pop(key, None)
 
 
+class VariantStore:
+    """Keep short-lived version choices behind unguessable tokens."""
+
+    def __init__(self, ttl_seconds: int = 21_600, max_entries: int = 200) -> None:
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.max_entries = max(10, int(max_entries))
+        self._items: dict[str, VariantRecord] = {}
+
+    def put(
+        self,
+        query_title: str,
+        variants: tuple[SearchResult, ...],
+        now: float | None = None,
+    ) -> str:
+        current = time.monotonic() if now is None else now
+        self._purge(current)
+        while len(self._items) >= self.max_entries:
+            oldest = min(self._items, key=lambda key: self._items[key].expires_at)
+            self._items.pop(oldest, None)
+        token = secrets.token_urlsafe(12)
+        self._items[token] = VariantRecord(
+            query_title=query_title,
+            variants=variants,
+            expires_at=current + self.ttl_seconds,
+        )
+        return token
+
+    def get(self, token: str, now: float | None = None) -> VariantRecord | None:
+        current = time.monotonic() if now is None else now
+        record = self._items.get(token)
+        if record is None:
+            return None
+        if record.expires_at <= current:
+            self._items.pop(token, None)
+            return None
+        return record
+
+    def _purge(self, now: float) -> None:
+        expired = [key for key, value in self._items.items() if value.expires_at <= now]
+        for key in expired:
+            self._items.pop(key, None)
+
+
+class CollectionStore:
+    """Keep lazy-loaded replay collections behind unguessable tokens."""
+
+    def __init__(self, ttl_seconds: int = 21_600, max_entries: int = 200) -> None:
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.max_entries = max(10, int(max_entries))
+        self._items: dict[str, CollectionRecord] = {}
+
+    def put(
+        self,
+        query_title: str,
+        first_page: CollectionPage,
+        now: float | None = None,
+    ) -> str:
+        current = time.monotonic() if now is None else now
+        self._purge(current)
+        while len(self._items) >= self.max_entries:
+            oldest = min(self._items, key=lambda key: self._items[key].expires_at)
+            self._items.pop(oldest, None)
+        token = secrets.token_urlsafe(12)
+        self._items[token] = CollectionRecord(
+            query_title=query_title,
+            pages={first_page.page: first_page},
+            expires_at=current + self.ttl_seconds,
+        )
+        return token
+
+    def get(self, token: str, now: float | None = None) -> CollectionRecord | None:
+        current = time.monotonic() if now is None else now
+        record = self._items.get(token)
+        if record is None:
+            return None
+        if record.expires_at <= current:
+            self._items.pop(token, None)
+            return None
+        return record
+
+    def _purge(self, now: float) -> None:
+        expired = [key for key, value in self._items.items() if value.expires_at <= now]
+        for key in expired:
+            self._items.pop(key, None)
+
+
 def validate_public_base_url(value: object) -> str:
     """Return a usable public origin/base path or an empty string."""
     text = str(value or "").strip().rstrip("/")
@@ -95,6 +197,11 @@ class ShortDramaPlayerServer:
         self.port = max(1, min(int(port), 65_535))
         self.public_base_url = validate_public_base_url(public_base_url)
         self.store = EpisodePlaylistStore(token_ttl_seconds, max_playlists)
+        self.variant_store = VariantStore(token_ttl_seconds, max_playlists)
+        self.collection_store = CollectionStore(token_ttl_seconds, max_playlists)
+        self.collection_loader: (
+            Callable[[str, int], Awaitable[CollectionPage]] | None
+        ) = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self.started = False
@@ -110,6 +217,30 @@ class ShortDramaPlayerServer:
         app.router.add_get(f"{_ROUTE_PREFIX}/health", self._handle_health)
         app.router.add_get(f"{_ROUTE_PREFIX}/watch/{{token}}", self._handle_watch)
         app.router.add_get(f"{_ROUTE_PREFIX}/api/{{token}}", self._handle_api)
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/variants/{{token}}",
+            self._handle_variants,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/choose/{{token}}/{{index}}",
+            self._handle_choose,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/collection/{{token}}",
+            self._handle_collection,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/collection-api/{{token}}",
+            self._handle_collection_api,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/collection-choose/{{token}}/{{page}}/{{index}}",
+            self._handle_collection_choose,
+        )
+        app.router.add_get(
+            f"{_ROUTE_PREFIX}/collection.js",
+            self._handle_collection_javascript,
+        )
         app.router.add_get(f"{_ROUTE_PREFIX}/player.js", self._handle_javascript)
 
         self._runner = web.AppRunner(app, access_log=None)
@@ -166,6 +297,34 @@ class ShortDramaPlayerServer:
             f"{self.public_base_url}{_ROUTE_PREFIX}/watch/{token}?{query}"
         )
 
+    def create_variants_url(
+        self,
+        query_title: str,
+        variants: tuple[SearchResult, ...],
+    ) -> str | None:
+        if (
+            not self.started
+            or not self.public_base_url
+            or len(variants) < 2
+        ):
+            return None
+        token = self.variant_store.put(query_title, variants)
+        return f"{self.public_base_url}{_ROUTE_PREFIX}/variants/{token}"
+
+    def create_collection_url(
+        self,
+        query_title: str,
+        first_page: CollectionPage,
+    ) -> str | None:
+        if (
+            not self.started
+            or not self.public_base_url
+            or not first_page.items
+        ):
+            return None
+        token = self.collection_store.put(query_title, first_page)
+        return f"{self.public_base_url}{_ROUTE_PREFIX}/collection/{token}"
+
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": True, "plugin": "jiang_short_drama", "player": True},
@@ -208,6 +367,159 @@ class ShortDramaPlayerServer:
             headers={"Cache-Control": "private, no-store"},
         )
 
+    async def _handle_variants(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.variant_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="版本选择链接已失效，请回到微信重新搜索")
+        return web.Response(
+            text=_variant_html(record, token),
+            content_type="text/html",
+            charset="utf-8",
+            headers=_page_headers(),
+        )
+
+    async def _handle_choose(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.variant_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="版本选择链接已失效，请回到微信重新搜索")
+        try:
+            index = int(request.match_info["index"]) - 1
+        except ValueError:
+            raise web.HTTPNotFound(text="无效的版本编号")
+        if index < 0 or index >= len(record.variants):
+            raise web.HTTPNotFound(text="无效的版本编号")
+        result = record.variants[index]
+        playlist_token = self.store.put(result)
+        destination = (
+            f"{self.public_base_url}{_ROUTE_PREFIX}/watch/{playlist_token}?ep=1"
+        )
+        raise web.HTTPFound(location=destination)
+
+    async def _load_collection_page(
+        self,
+        record: CollectionRecord,
+        page: int,
+    ) -> CollectionPage | None:
+        cached = record.pages.get(page)
+        if cached is not None:
+            return cached
+        if self.collection_loader is None:
+            return None
+        loaded = await self.collection_loader(record.query_title, page)
+        seen = {
+            normalize_title(item.title)
+            for existing_page, existing in record.pages.items()
+            if existing_page != page
+            for item in existing.items
+        }
+        if seen:
+            loaded = CollectionPage(
+                query=loaded.query,
+                page=loaded.page,
+                items=tuple(
+                    item
+                    for item in loaded.items
+                    if normalize_title(item.title) not in seen
+                ),
+                has_more=loaded.has_more,
+            )
+        record.pages[page] = loaded
+        return loaded
+
+    async def _handle_collection(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.collection_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="赛事回放链接已失效，请回到微信重新搜索")
+        return web.Response(
+            text=_collection_html(record.query_title),
+            content_type="text/html",
+            charset="utf-8",
+            headers=_page_headers(),
+        )
+
+    async def _handle_collection_api(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.collection_store.get(token)
+        if record is None:
+            return web.json_response(
+                {"ok": False, "error": "赛事回放链接已失效，请重新搜索"},
+                status=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            page = max(1, int(request.query.get("page", "1")))
+        except ValueError:
+            page = 1
+        collection_page = await self._load_collection_page(record, page)
+        if collection_page is None:
+            return web.json_response(
+                {"ok": False, "error": "暂时无法加载更多回放"},
+                status=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "query": record.query_title,
+                "page": page,
+                "has_more": collection_page.has_more,
+                "items": [
+                    {
+                        "title": item.title,
+                        "source": item.source,
+                        "cover": item.cover_url,
+                        "category": item.category,
+                        "remarks": item.remarks,
+                        "episodes": len(item.episodes),
+                        "choose": (
+                            f"../collection-choose/{quote(token, safe='')}/"
+                            f"{page}/{index}"
+                        ),
+                    }
+                    for index, item in enumerate(collection_page.items, start=1)
+                ],
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    async def _handle_collection_choose(self, request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        record = self.collection_store.get(token)
+        if record is None:
+            raise web.HTTPNotFound(text="赛事回放链接已失效，请回到微信重新搜索")
+        try:
+            page = max(1, int(request.match_info["page"]))
+            index = int(request.match_info["index"]) - 1
+        except ValueError:
+            raise web.HTTPNotFound(text="无效的回放编号")
+        collection_page = await self._load_collection_page(record, page)
+        if (
+            collection_page is None
+            or index < 0
+            or index >= len(collection_page.items)
+        ):
+            raise web.HTTPNotFound(text="无效的回放编号")
+        result = collection_page.items[index]
+        playlist_token = self.store.put(result)
+        destination = (
+            f"{self.public_base_url}{_ROUTE_PREFIX}/watch/{playlist_token}?ep=1"
+        )
+        raise web.HTTPFound(location=destination)
+
+    async def _handle_collection_javascript(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        return web.Response(
+            text=_COLLECTION_JAVASCRIPT,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
     async def _handle_javascript(self, request: web.Request) -> web.Response:
         return web.Response(
             text=_PLAYER_JAVASCRIPT,
@@ -232,6 +544,247 @@ def _page_headers() -> dict[str, str]:
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "SAMEORIGIN",
     }
+
+
+def _variant_html(record: VariantRecord, token: str) -> str:
+    safe_query = escape(record.query_title or "短剧")
+    safe_token = quote(token, safe="")
+    cards: list[str] = []
+    for index, result in enumerate(record.variants, start=1):
+        title = escape(result.title or record.query_title)
+        category = escape(result.category or "类型未知")
+        year = escape(f"{result.year}年" if result.year else "年份未知")
+        source = escape(result.source or "未知来源")
+        actors = [
+            value.strip()
+            for value in re.split(r"[,，、/]+", result.actor)
+            if value.strip()
+        ][:2]
+        actor_text = escape("、".join(actors)) if actors else "演员信息暂无"
+        cover = str(result.cover_url or "").strip()
+        parsed_cover = urlsplit(cover)
+        cover_html = ""
+        if parsed_cover.scheme in {"http", "https"} and parsed_cover.netloc:
+            cover_html = (
+                f'<img src="{escape(cover, quote=True)}" alt="{title}封面" '
+                'loading="lazy" referrerpolicy="no-referrer">'
+            )
+        cards.append(
+            f"""
+      <a class="version-card" href="../choose/{safe_token}/{index}">
+        <div class="cover"><span>{escape((result.title or "剧")[0])}</span>{cover_html}</div>
+        <div class="info">
+          <div class="title"><span class="number">{index}</span><strong>{title}</strong></div>
+          <div class="tags"><span>{year}</span><span>{category}</span><span>{len(result.episodes)}集</span></div>
+          <div class="actor">{actor_text}</div>
+          <div class="source">{source}</div>
+          <div class="play">播放此版本 <span>›</span></div>
+        </div>
+      </a>"""
+        )
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>选择《{safe_query}》的版本</title>
+  <style>
+    :root {{ color-scheme: dark; font-family: system-ui,-apple-system,"Microsoft YaHei",sans-serif; --accent:#20c5a5; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; min-height:100vh; background:#0b0c0f; color:#f4f6f8; }}
+    main {{ width:min(100%,920px); margin:0 auto; padding:20px 14px max(28px,env(safe-area-inset-bottom)); }}
+    header {{ margin:0 2px 18px; }}
+    h1 {{ margin:0 0 7px; font-size:clamp(22px,5.8vw,32px); line-height:1.3; }}
+    header p {{ margin:0; color:#9298a2; font-size:14px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
+    .version-card {{ display:grid; grid-template-columns:minmax(92px,38%) 1fr; min-height:164px; overflow:hidden; border:1px solid #292d34; border-radius:15px; color:inherit; background:#17191e; box-shadow:0 8px 24px rgba(0,0,0,.2); text-decoration:none; }}
+    .cover {{ position:relative; min-height:164px; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#68717d; background:linear-gradient(145deg,#232a33,#111419); font-size:42px; font-weight:750; }}
+    .cover img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+    .info {{ display:flex; min-width:0; flex-direction:column; padding:12px 12px 10px; }}
+    .title {{ display:flex; align-items:flex-start; gap:7px; min-width:0; }}
+    .title strong {{ display:-webkit-box; overflow:hidden; font-size:16px; line-height:1.38; -webkit-box-orient:vertical; -webkit-line-clamp:2; }}
+    .number {{ flex:0 0 auto; min-width:22px; height:22px; padding:0 5px; border-radius:7px; color:#061813; background:var(--accent); font-size:13px; font-weight:750; line-height:22px; text-align:center; }}
+    .tags {{ display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; }}
+    .tags span {{ padding:3px 6px; border:1px solid #343943; border-radius:6px; color:#c8cdd4; background:#202329; font-size:11px; }}
+    .actor,.source {{ overflow:hidden; margin-top:7px; color:#9399a3; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }}
+    .source {{ margin-top:3px; color:#6f7681; }}
+    .play {{ display:flex; align-items:center; justify-content:space-between; margin-top:auto; padding-top:8px; color:var(--accent); font-size:13px; font-weight:650; }}
+    .play span {{ font-size:23px; line-height:14px; }}
+    .tip {{ margin:16px 2px 0; color:#717883; font-size:12px; text-align:center; }}
+    @media (max-width:620px) {{
+      main {{ padding:16px 10px max(22px,env(safe-area-inset-bottom)); }}
+      header {{ margin-bottom:14px; }}
+      .grid {{ grid-template-columns:1fr; gap:10px; }}
+      .version-card {{ grid-template-columns:118px 1fr; min-height:168px; border-radius:13px; }}
+      .cover {{ min-height:168px; }}
+    }}
+    @media (hover:hover) {{ .version-card:hover {{ border-color:rgba(32,197,165,.7); transform:translateY(-1px); }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>选择《{safe_query}》的版本</h1><p>共 {len(record.variants)} 个可播放版本，点击封面或卡片即可观看</p></header>
+    <section class="grid">{''.join(cards)}</section>
+    <p class="tip">版本信息来自资源站；如封面或年份有误，请根据演员和集数判断。</p>
+  </main>
+</body>
+</html>"""
+
+
+def _collection_html(query_title: str) -> str:
+    safe_query = escape(query_title or "赛事回放")
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>{safe_query} 比赛回放</title>
+  <style>
+    :root {{ color-scheme:dark; font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; --accent:#20c5a5; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; min-height:100vh; background:#0b0c0f; color:#f4f6f8; }}
+    main {{ width:min(100%,900px); margin:0 auto; padding:18px 12px max(28px,env(safe-area-inset-bottom)); }}
+    header {{ position:sticky; z-index:4; top:0; margin:-18px -12px 12px; padding:16px 14px 12px; border-bottom:1px solid rgba(255,255,255,.07); background:rgba(11,12,15,.94); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }}
+    h1 {{ margin:0 0 5px; font-size:clamp(21px,5.6vw,30px); }}
+    header p {{ margin:0; color:#9298a2; font-size:13px; }}
+    #list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+    .replay {{ display:grid; grid-template-columns:96px 1fr; min-height:116px; overflow:hidden; border:1px solid #292d34; border-radius:13px; color:inherit; background:#17191e; text-decoration:none; }}
+    .cover {{ position:relative; display:flex; align-items:center; justify-content:center; overflow:hidden; color:#66707c; background:linear-gradient(145deg,#25303a,#111419); font-size:28px; font-weight:800; }}
+    .cover img {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+    .info {{ display:flex; min-width:0; flex-direction:column; padding:10px 10px 8px; }}
+    .title {{ display:-webkit-box; overflow:hidden; font-size:14px; font-weight:650; line-height:1.42; -webkit-box-orient:vertical; -webkit-line-clamp:3; }}
+    .meta {{ display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }}
+    .meta span {{ padding:2px 5px; border:1px solid #343943; border-radius:5px; color:#afb5bd; background:#202329; font-size:10px; }}
+    .source {{ overflow:hidden; margin-top:auto; padding-top:5px; color:#707782; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }}
+    .footer {{ display:flex; flex-direction:column; align-items:center; gap:9px; padding:18px 0 4px; }}
+    #status {{ min-height:18px; color:#858c96; font-size:12px; }}
+    #more {{ min-width:150px; min-height:40px; padding:0 18px; border:1px solid #343a43; border-radius:20px; color:#e8ebef; background:#20242a; font:inherit; font-size:13px; }}
+    #more:disabled {{ opacity:.55; }}
+    #more[hidden] {{ display:none; }}
+    @media (max-width:620px) {{
+      #list {{ grid-template-columns:1fr; gap:8px; }}
+      .replay {{ grid-template-columns:104px 1fr; min-height:122px; }}
+      .title {{ font-size:14px; -webkit-line-clamp:3; }}
+    }}
+    @media (hover:hover) {{ .replay:hover {{ border-color:rgba(32,197,165,.7); }} #more:hover:not(:disabled) {{ border-color:var(--accent); }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>{safe_query} 比赛回放</h1><p id="summary">正在载入最新回放…</p></header>
+    <section id="list" aria-live="polite"></section>
+    <div class="footer"><div id="sentinel"></div><div id="status"></div><button id="more" type="button" disabled>加载更多</button></div>
+  </main>
+  <script src="../collection.js?v=1.9.0"></script>
+</body>
+</html>"""
+
+
+_COLLECTION_JAVASCRIPT = r"""
+(() => {
+  'use strict';
+  const list = document.querySelector('#list');
+  const summary = document.querySelector('#summary');
+  const status = document.querySelector('#status');
+  const more = document.querySelector('#more');
+  const sentinel = document.querySelector('#sentinel');
+  const apiUrl = new URL(location.href);
+  apiUrl.pathname = apiUrl.pathname.replace('/collection/', '/collection-api/');
+  apiUrl.search = '';
+  let nextPage = 1;
+  let loading = false;
+  let hasMore = true;
+  let total = 0;
+  let autoAllowed = false;
+
+  function safeCover(value) {
+    try {
+      const url = new URL(value);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch (_error) { return ''; }
+  }
+
+  function replayCard(item) {
+    const link = document.createElement('a');
+    link.className = 'replay';
+    link.href = item.choose;
+    const cover = document.createElement('div');
+    cover.className = 'cover';
+    cover.textContent = '回放';
+    const coverUrl = safeCover(item.cover);
+    if (coverUrl) {
+      const image = document.createElement('img');
+      image.src = coverUrl;
+      image.alt = `${item.title}封面`;
+      image.loading = 'lazy';
+      image.referrerPolicy = 'no-referrer';
+      cover.appendChild(image);
+    }
+    const info = document.createElement('div');
+    info.className = 'info';
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = item.title;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    [item.category, item.remarks, item.episodes > 1 ? `${item.episodes}段` : '正片']
+      .filter(Boolean)
+      .forEach((value) => {
+        const tag = document.createElement('span');
+        tag.textContent = value;
+        meta.appendChild(tag);
+      });
+    const source = document.createElement('div');
+    source.className = 'source';
+    source.textContent = item.source;
+    info.append(title, meta, source);
+    link.append(cover, info);
+    return link;
+  }
+
+  async function loadNext(triggeredByScroll = false) {
+    if (loading || !hasMore) return;
+    loading = true;
+    autoAllowed = false;
+    more.disabled = true;
+    more.textContent = '正在加载…';
+    status.textContent = `正在读取第 ${nextPage} 页`;
+    try {
+      const url = new URL(apiUrl);
+      url.searchParams.set('page', String(nextPage));
+      const response = await fetch(url, { cache: 'no-store', credentials: 'omit' });
+      const body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.error || '加载失败');
+      body.items.forEach((item) => list.appendChild(replayCard(item)));
+      total += body.items.length;
+      hasMore = Boolean(body.has_more);
+      nextPage += 1;
+      summary.textContent = `已加载 ${total} 场，向下浏览可继续加载`;
+      status.textContent = body.items.length
+        ? ''
+        : (hasMore ? '本页没有匹配回放，可继续加载下一页' : '已加载全部回放');
+      autoAllowed = body.items.length > 0 && hasMore;
+      more.hidden = !hasMore;
+      more.disabled = !hasMore;
+      more.textContent = hasMore ? '加载更多' : '已加载全部';
+    } catch (error) {
+      status.textContent = error.message || '加载失败，请重试';
+      more.disabled = false;
+      more.textContent = '重试';
+      if (triggeredByScroll) autoAllowed = false;
+    } finally {
+      loading = false;
+    }
+  }
+
+  more.addEventListener('click', () => loadNext(false));
+  const observer = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting) && autoAllowed) loadNext(true);
+  }, { rootMargin: '500px 0px' });
+  observer.observe(sentinel);
+  loadNext(false);
+})();
+""".strip()
 
 
 def _player_html(title: str) -> str:
@@ -368,7 +921,7 @@ def _player_html(title: str) -> str:
     </section>
   </main>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
-  <script src="../player.js?v=1.2.4"></script>
+  <script src="../player.js?v=1.9.0"></script>
 </body>
 </html>"""
 
