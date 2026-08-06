@@ -66,7 +66,24 @@ from .schedule_store import (
 
 
 class CommandMatchTests(unittest.TestCase):
-    def test_recommendation_cover_uses_first_item_only(self):
+    def test_recommendation_cover_uses_first_available_item(self):
+        first = SearchResult(
+            title="第一部",
+            source="测试源",
+            episodes=(Episode("正片", "https://cdn.example/first.m3u8"),),
+        )
+        second = SearchResult(
+            title="第二部",
+            source="测试源",
+            cover_url="https://img.example/second.jpg",
+            episodes=(Episode("正片", "https://cdn.example/second.m3u8"),),
+        )
+        self.assertEqual(
+            _first_recommendation_cover((first, second)),
+            second.cover_url,
+        )
+
+    def test_recommendation_cover_prefers_first_item_when_present(self):
         first = SearchResult(
             title="第一部",
             source="测试源",
@@ -84,7 +101,25 @@ class CommandMatchTests(unittest.TestCase):
             first.cover_url,
         )
 
-    def test_recommendation_cover_does_not_borrow_second_item(self):
+    def test_recommendation_cover_skips_blank_values(self):
+        first = SearchResult(
+            title="第一部",
+            source="测试源",
+            cover_url="   ",
+            episodes=(Episode("正片", "https://cdn.example/first.m3u8"),),
+        )
+        second = SearchResult(
+            title="第二部",
+            source="测试源",
+            cover_url="https://img.example/second.jpg",
+            episodes=(Episode("正片", "https://cdn.example/second.m3u8"),),
+        )
+        self.assertEqual(
+            _first_recommendation_cover((first, second)),
+            "https://img.example/second.jpg",
+        )
+
+    def test_recommendation_cover_falls_back_to_default_when_none_present(self):
         first = SearchResult(
             title="第一部",
             source="测试源",
@@ -93,7 +128,6 @@ class CommandMatchTests(unittest.TestCase):
         second = SearchResult(
             title="第二部",
             source="测试源",
-            cover_url="https://img.example/second.jpg",
             episodes=(Episode("正片", "https://cdn.example/second.m3u8"),),
         )
         self.assertEqual(

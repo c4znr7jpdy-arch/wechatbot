@@ -54,10 +54,12 @@ def _recommendation_heading(media_type: str) -> str:
 def _first_recommendation_cover(
     recommendations: tuple[SearchResult, ...],
 ) -> str:
-    """只使用推荐列表第一条的封面，缺失时回退默认图。"""
-    if not recommendations:
-        return _DEFAULT_COVER
-    return recommendations[0].cover_url or _DEFAULT_COVER
+    """优先使用推荐列表第一条有封面的作品；都没有时回退默认图。"""
+    for result in recommendations:
+        cover_url = (result.cover_url or "").strip()
+        if cover_url:
+            return cover_url
+    return _DEFAULT_COVER
 
 
 async def _scheduled_recommendation_callback(

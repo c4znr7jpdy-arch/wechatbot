@@ -2,11 +2,13 @@
 基础命令插件 — 新闻、天气、Epic、KFC、油价、B站动态、帮助
 直接复用 ai_plugin 下的现有模块，通过 sys.path 引入
 """
+import asyncio
 import sys
 import os
 import re
 import logging
 import importlib
+import random
 import tempfile
 import time
 from pathlib import Path
@@ -38,6 +40,64 @@ _RANDOM_IMAGE_HEADERS = {
         "Chrome/137.0.0.0 Safari/537.36"
     )
 }
+_TAROT_MAJOR_ARCANA = (
+    ("愚者", "新的开始、冒险、自由"),
+    ("魔术师", "行动力、资源整合、创造"),
+    ("女祭司", "直觉、秘密、静观"),
+    ("女皇", "滋养、丰盛、关系生长"),
+    ("皇帝", "秩序、边界、掌控"),
+    ("教皇", "传统、学习、规则"),
+    ("恋人", "选择、吸引、价值一致"),
+    ("战车", "推进、意志、胜利"),
+    ("力量", "温柔的勇气、自控、耐心"),
+    ("隐士", "独处、内省、寻找答案"),
+    ("命运之轮", "转机、循环、变化"),
+    ("正义", "平衡、判断、因果"),
+    ("倒吊人", "暂停、换角度、牺牲"),
+    ("死神", "结束、蜕变、旧事翻篇"),
+    ("节制", "调和、疗愈、适度"),
+    ("恶魔", "执念、诱惑、被困住"),
+    ("高塔", "突变、瓦解、真相暴露"),
+    ("星星", "希望、修复、远方的光"),
+    ("月亮", "迷雾、潜意识、不确定"),
+    ("太阳", "明朗、活力、成功"),
+    ("审判", "觉醒、复盘、召唤"),
+    ("世界", "完成、整合、新阶段"),
+)
+_TAROT_SUITS = {
+    "权杖": ("行动、热情、创造力", "点燃这件事的火"),
+    "圣杯": ("情绪、关系、感受", "照见心里的水位"),
+    "宝剑": ("想法、沟通、冲突", "把问题切清楚"),
+    "星币": ("现实、资源、稳定", "落到现实层面的土壤"),
+}
+_TAROT_MINOR_RANKS = (
+    ("王牌", "种子、机会、起点"),
+    ("二", "选择、平衡、协作"),
+    ("三", "扩展、成果、交流"),
+    ("四", "稳定、休整、停滞"),
+    ("五", "摩擦、短缺、挑战"),
+    ("六", "流动、互助、回归"),
+    ("七", "评估、防守、耐心"),
+    ("八", "推进、练习、变化"),
+    ("九", "积累、临界、独处"),
+    ("十", "完成、压力、收束"),
+    ("侍从", "消息、学习、试探"),
+    ("骑士", "推进、表达、追逐"),
+    ("王后", "成熟、照料、内在力量"),
+    ("国王", "掌控、责任、外在权威"),
+)
+_TAROT_SPREAD = ("现状", "阻碍", "建议", "走向")
+
+
+def _build_tarot_deck() -> list[tuple[str, str]]:
+    deck = list(_TAROT_MAJOR_ARCANA)
+    for suit, (suit_keywords, suit_note) in _TAROT_SUITS.items():
+        for rank, rank_keywords in _TAROT_MINOR_RANKS:
+            deck.append((f"{suit}{rank}", f"{suit_keywords}；{rank_keywords}；{suit_note}"))
+    return deck
+
+
+_TAROT_DECK = _build_tarot_deck()
 
 
 def _strip_system_identity_prefix(text: str) -> str:
@@ -63,6 +123,52 @@ def _is_valid_random_image_response(response) -> bool:
         response.status_code == 200
         and content_type.startswith("image/")
         and len(response.content) > 1000
+    )
+
+
+def _draw_tarot_cards(count: int) -> list[dict[str, str]]:
+    cards = random.sample(_TAROT_DECK, k=min(count, len(_TAROT_DECK)))
+    results = []
+    for name, keywords in cards:
+        reversed_card = random.choice((False, True))
+        results.append(
+            {
+                "name": name,
+                "orientation": "逆位" if reversed_card else "正位",
+                "keywords": keywords,
+                "tone": "提醒先别硬冲，换个姿势会顺一点"
+                if reversed_card
+                else "这张牌的力道比较顺，可以主动推进",
+            }
+        )
+    return results
+
+
+def _format_single_tarot(card: dict[str, str]) -> str:
+    return (
+        f"你抽到：{card['orientation']}{card['name']}\n"
+        f"关键词：{card['keywords']}\n"
+        f"牌意：{card['tone']}。"
+    )
+
+
+def _format_tarot_spread(cards: list[dict[str, str]]) -> str:
+    lines = ["给你抽了四张："]
+    for position, card in zip(_TAROT_SPREAD, cards):
+        lines.append(
+            f"{position}：{card['orientation']}{card['name']} - "
+            f"{card['keywords']}。{card['tone']}。"
+        )
+    lines.append("整体看，先抓住最亮的那条线，别被一时情绪带跑。")
+    return "\n".join(lines)
+
+
+def _format_tarot_spread_card(position: str, card: dict[str, str], index: int) -> str:
+    return (
+        f"第 {index} 张｜{position}\n"
+        f"{card['orientation']}{card['name']}\n"
+        f"关键词：{card['keywords']}\n"
+        f"牌意：{card['tone']}。"
     )
 
 
@@ -397,6 +503,55 @@ class Main(star.Star):
         except Exception as e:
             logger.exception(f"/燕云 失败: {e}")
             yield event.plain_result(f"获取燕云动态失败: {e}")
+
+    # ── /塔罗牌 ────────────────────────────────────────
+    @filter.command("塔罗牌")
+    async def tarot_card(self, event: AstrMessageEvent):
+        """抽一张塔罗牌"""
+        try:
+            card = _draw_tarot_cards(1)[0]
+            _record_event_action(
+                event,
+                "content.tarot_card",
+                "塔罗牌",
+                {"count": 1, "card": card["name"], "orientation": card["orientation"]},
+            )
+            yield event.plain_result(_format_single_tarot(card))
+        except Exception as e:
+            logger.exception(f"/塔罗牌 失败: {e}")
+            yield event.plain_result(f"抽牌失败: {e}")
+
+    # ── /占卜 ──────────────────────────────────────────
+    @filter.command("占卜")
+    async def tarot_divination(self, event: AstrMessageEvent):
+        """抽四张塔罗牌占卜"""
+        try:
+            cards = _draw_tarot_cards(4)
+            _record_event_action(
+                event,
+                "content.tarot_divination",
+                "塔罗占卜",
+                {
+                    "count": 4,
+                    "cards": [
+                        {
+                            "name": card["name"],
+                            "orientation": card["orientation"],
+                        }
+                        for card in cards
+                    ],
+                },
+            )
+            yield event.plain_result("牌阵起好了，给你抽四张。")
+            for index, (position, card) in enumerate(zip(_TAROT_SPREAD, cards), start=1):
+                if index > 1:
+                    await asyncio.sleep(5)
+                yield event.plain_result(_format_tarot_spread_card(position, card, index))
+            await asyncio.sleep(5)
+            yield event.plain_result("整体看，先抓住最亮的那条线，别被一时情绪带跑。")
+        except Exception as e:
+            logger.exception(f"/占卜 失败: {e}")
+            yield event.plain_result(f"占卜失败: {e}")
 
     # ── /帮助 ──────────────────────────────────────────
     @filter.command("帮助")
